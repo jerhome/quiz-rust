@@ -10,7 +10,10 @@ mod widgets;
 use eframe::egui;
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // winit warns about WSLg quirks (no XSETTINGS manager, 0mm display) that are harmless here.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,winit=error"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let runtime = tokio::runtime::Runtime::new()?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
