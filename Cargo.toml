@@ -9,3 +9,15 @@ license = "MIT"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies rarely need stepping through; optimizing them keeps the debug app responsive.
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
+
+[profile.release]
+strip = true
+lto = "thin"
