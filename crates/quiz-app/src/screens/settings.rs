@@ -2,7 +2,8 @@ use eframe::egui;
 use quiz_llm::{validate_model_id, MODELS};
 
 use crate::app::QuizApp;
-use crate::i18n::{t, Key};
+use crate::backend::Backend;
+use crate::i18n::{t, tf, Key};
 use crate::screens::setup::{api_key_field, lang_options};
 use crate::theme;
 use crate::widgets::{self, ButtonKind};
@@ -33,6 +34,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
         model_section(ui, app);
         api_key_field(ui, &mut app.form, lang);
         key_memory(ui, app);
+        if cfg!(target_os = "linux") {
+            display_section(ui, app);
+        }
     });
     ui.add_space(theme::GAP);
     if widgets::button(ui, t(lang, Key::Back), ButtonKind::Secondary, None).clicked() {
@@ -98,4 +102,56 @@ fn key_memory(ui: &mut egui::Ui, app: &mut QuizApp) {
     if widgets::button(ui, t(lang, Key::ForgetSaved), ButtonKind::Secondary, None).clicked() {
         app.forget_key();
     }
+}
+
+fn display_section(ui: &mut egui::Ui, app: &mut QuizApp) {
+    let lang = app.lang();
+    ui.add_space(theme::GAP);
+    ui.separator();
+    ui.label(theme::semi(t(lang, Key::Display), theme::SIZE_SUBTITLE));
+    let options: Vec<_> = Backend::ALL
+        .iter()
+        .map(|b| (*b, b.label().to_string()))
+        .collect();
+    widgets::segmented(ui, &mut app.settings.display_backend, &options);
+    ui.label(theme::dim(t(lang, Key::DisplayHelp)));
+    let current = tf(
+        lang,
+        Key::DisplayCurrent,
+        &[app.active_backend.backend.label()],
+    );
+    widgets::badge(ui, &current, theme::TEXT_DIM);
+    if app.active_backend.fell_back {
+        ui.label(theme::dim(t(lang, Key::WaylandFallback)));
+    }
+    if app.restart_needed() && app.restart_dismissed != Some(app.settings.display_backend) {
+        restart_banner(ui, app);
+    }
+    if app.restart_failed {
+        widgets::error_text(ui, t(lang, Key::RestartFailed));
+    }
+}
+
+fn restart_banner(ui: &mut egui::Ui, app: &mut QuizApp) {
+    let lang = app.lang();
+    widgets::card_styled(ui, theme::tint(theme::ACCENT, 0.1), theme::ACCENT, |ui| {
+        ui.label(t(lang, Key::RestartNeeded));
+        ui.horizontal(|ui| {
+            let half = ui.available_width() / 2.0 - 6.0;
+            if widgets::button(
+                ui,
+                t(lang, Key::RestartNow),
+                ButtonKind::Primary,
+                Some(half),
+            )
+            .clicked()
+            {
+                app.request_restart(ui.ctx());
+            }
+            let later = widgets::button(ui, t(lang, Key::Later), ButtonKind::Secondary, Some(half));
+            if later.clicked() {
+                app.restart_dismissed = Some(app.settings.display_backend);
+            }
+        });
+    });
 }

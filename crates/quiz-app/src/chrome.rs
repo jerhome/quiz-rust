@@ -65,7 +65,17 @@ pub fn header(ctx: &egui::Context, app: &mut QuizApp, screen: Screen) {
         });
 }
 
-pub fn confirm_modal(ctx: &egui::Context, kind: QuitKind, lang: Lang) -> Option<bool> {
+pub fn confirm_modal(
+    ctx: &egui::Context,
+    kind: QuitKind,
+    lang: Lang,
+    restart: bool,
+) -> Option<bool> {
+    let (title, confirm) = if restart {
+        (Key::RestartTitle, Key::RestartConfirm)
+    } else {
+        (Key::QuitTitle, Key::Quit)
+    };
     let mut result = None;
     let frame = egui::Frame::NONE
         .fill(theme::SURFACE)
@@ -76,13 +86,12 @@ pub fn confirm_modal(ctx: &egui::Context, kind: QuitKind, lang: Lang) -> Option<
         .frame(frame)
         .show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(theme::semi(t(lang, Key::QuitTitle), theme::SIZE_SUBTITLE));
+            ui.label(theme::semi(t(lang, title), theme::SIZE_SUBTITLE));
             ui.label(egui::RichText::new(t(lang, kind.message())).color(theme::TEXT_DIM));
             ui.add_space(theme::GAP);
             ui.horizontal(|ui| {
                 let half = ui.available_width() / 2.0 - 6.0;
-                if widgets::button(ui, t(lang, Key::Quit), ButtonKind::Primary, Some(half))
-                    .clicked()
+                if widgets::button(ui, t(lang, confirm), ButtonKind::Primary, Some(half)).clicked()
                 {
                     result = Some(true);
                 }

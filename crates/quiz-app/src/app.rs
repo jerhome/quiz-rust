@@ -120,11 +120,20 @@ pub struct QuizApp {
     dirty_since: Option<Instant>,
     env_key: Option<String>,
     pub confirm_quit: bool,
+    confirm_restart: bool,
+    pub restart_failed: bool,
+    /// Selection for which the user chose "Later" (banner hidden until the choice changes).
+    pub restart_dismissed: Option<crate::backend::Backend>,
+    pub active_backend: crate::backend::Active,
     quitting: bool,
 }
 
 impl QuizApp {
-    pub fn new(ctx: &egui::Context, runtime: Runtime) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        runtime: Runtime,
+        active_backend: crate::backend::Active,
+    ) -> Self {
         crate::theme::install(ctx);
         let (tx, rx) = channel();
         let settings_path = settings::config_path();
@@ -148,6 +157,10 @@ impl QuizApp {
             dirty_since: None,
             env_key,
             confirm_quit: false,
+            confirm_restart: false,
+            restart_failed: false,
+            restart_dismissed: None,
+            active_backend,
             quitting: false,
             route: Route::Home,
             notice: None,
@@ -417,12 +430,21 @@ impl QuizApp {
             self.confirm_quit = false;
             return;
         };
-        match crate::chrome::confirm_modal(ctx, kind, self.lang()) {
+        let restart = self.confirm_restart;
+        match crate::chrome::confirm_modal(ctx, kind, self.lang(), restart) {
             Some(true) => {
                 self.confirm_quit = false;
-                self.finish_quit(ctx);
+                self.confirm_restart = false;
+                if restart {
+                    self.restart_now(ctx);
+                } else {
+                    self.finish_quit(ctx);
+                }
             }
-            Some(false) => self.confirm_quit = false,
+            Some(false) => {
+                self.confirm_quit = false;
+                self.confirm_restart = false;
+            }
             None => {}
         }
     }
@@ -473,14 +495,43 @@ impl QuizApp {
         self.dirty_since = None;
     }
 
-    fn cleanup(&mut self) {
+    fn flush_settings(&mut self) {
         let snap = self.snapshot();
         if snap != self.saved {
             self.write_settings(snap);
         }
+    }
+
+    fn cleanup(&mut self) {
+        self.flush_settings();
         // Dropping the session calls shutdown() (host) / disconnect() (client).
         self.session = None;
         self.join.discovery = None;
+    }
+
+    pub fn restart_needed(&self) -> bool {
+        crate::backend::restart_needed(self.settings.display_backend, self.active_backend)
+    }
+
+    /// Asks for confirmation first when a quiz or session would be lost.
+    pub fn request_restart(&mut self, ctx: &egui::Context) {
+        self.restart_failed = false;
+        if self.quit_kind().is_some() {
+            self.confirm_quit = true;
+            self.confirm_restart = true;
+        } else {
+            self.restart_now(ctx);
+        }
+    }
+
+    // Settings must be on disk before the new instance starts, since it reads them at launch.
+    // If the launch fails the app (and any session) stays open.
+    fn restart_now(&mut self, ctx: &egui::Context) {
+        self.flush_settings();
+        match crate::backend::spawn_relaunch(None) {
+            Ok(()) => self.finish_quit(ctx),
+            Err(_) => self.restart_failed = true,
+        }
     }
 
     fn quit_kind(&self) -> Option<crate::chrome::QuitKind> {

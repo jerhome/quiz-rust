@@ -25,6 +25,8 @@ pub struct Settings {
     pub time_limit_secs: u32,
     pub name: String,
     pub remember_key: bool,
+    #[serde(deserialize_with = "crate::backend::deserialize_lenient")]
+    pub display_backend: crate::backend::Backend,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
@@ -41,6 +43,7 @@ impl std::fmt::Debug for Settings {
             .field("time_limit_secs", &self.time_limit_secs)
             .field("name", &self.name)
             .field("remember_key", &self.remember_key)
+            .field("display_backend", &self.display_backend)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -60,6 +63,7 @@ impl Default for Settings {
             time_limit_secs: 20,
             name: String::new(),
             remember_key: false,
+            display_backend: crate::backend::Backend::X11,
             api_key: None,
         }
     }
@@ -232,6 +236,7 @@ mod tests {
             time_limit_secs: 0,
             name: "Zoé".into(),
             remember_key: true,
+            display_backend: crate::backend::Backend::Wayland,
             api_key: Some("sk-test".into()),
         }
     }
