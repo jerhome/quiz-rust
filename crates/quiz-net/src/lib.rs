@@ -1,0 +1,25 @@
+//! LAN multiplayer: TCP host/client (JSON lines), UDP discovery, pure game logic.
+//! Everything is non-blocking; callers drain `events` receivers with `try_recv()`.
+
+mod client;
+mod discovery;
+mod error;
+pub mod game;
+mod io;
+mod protocol;
+mod server;
+
+use std::sync::Arc;
+
+/// Called on every event so the UI can `request_repaint()` without depending on egui.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
+pub use client::{Client, ClientEvent, ClientHandle};
+pub use discovery::{discover, discover_on, DiscoveredHost, DiscoveryHandle};
+pub use error::NetError;
+pub use game::{JoinError, PlayerId, HOST_ID, MAX_PLAYERS};
+pub use protocol::{
+    ClientMsg, ErrorCode, GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry, ServerMsg,
+    DEFAULT_PORT, DISCOVERY_PORT, MAX_LINE_BYTES, PROTOCOL_VERSION,
+};
+pub use server::{Host, HostConfig, HostEvent, HostHandle};

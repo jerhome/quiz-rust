@@ -1,0 +1,20 @@
+[package]
+name = "quiz-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quiz-core = { path = "../quiz-core" }
+quiz-llm = { path = "../quiz-llm" }
+quiz-net = { path = "../quiz-net" }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

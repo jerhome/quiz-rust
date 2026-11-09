@@ -1,0 +1,239 @@
+use crate::game::JoinError;
+use quiz_core::{Lang, Question};
+use serde::{Deserialize, Serialize};
+
+/// Bump on any wire change; the host refuses clients with another version.
+pub const PROTOCOL_VERSION: u32 = 3;
+pub const DEFAULT_PORT: u16 = 7878;
+pub const DISCOVERY_PORT: u16 = 7879;
+/// Bounds per-connection memory: a longer line drops the connection.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Language-independent so each client renders it in its own language;
+/// `ServerMsg::Error::message` is only a French fallback.
+pub enum ErrorCode {
+    VersionMismatch,
+    NameTaken,
+    NameEmpty,
+    NameTooLong,
+    LobbyFull,
+    ExpectedJoin,
+    InvalidMessage,
+}
+
+impl ErrorCode {
+    pub fn message(self, lang: Lang) -> &'static str {
+        use ErrorCode::*;
+        match (self, lang) {
+            (VersionMismatch, Lang::Fr) => "version de protocole incompatible",
+            (VersionMismatch, Lang::En) => "incompatible protocol version",
+            (NameTaken, Lang::Fr) => "ce nom est déjà pris",
+            (NameTaken, Lang::En) => "this name is already taken",
+            (NameEmpty, Lang::Fr) => "le nom est vide",
+            (NameEmpty, Lang::En) => "the name is empty",
+            (NameTooLong, Lang::Fr) => "le nom est trop long (24 caractères maximum)",
+            (NameTooLong, Lang::En) => "the name is too long (24 characters maximum)",
+            (LobbyFull, Lang::Fr) => "la partie est pleine (8 joueurs maximum)",
+            (LobbyFull, Lang::En) => "the game is full (8 players maximum)",
+            (ExpectedJoin, Lang::Fr) => "message d'inscription attendu",
+            (ExpectedJoin, Lang::En) => "join message expected",
+            (InvalidMessage, Lang::Fr) => "message invalide",
+            (InvalidMessage, Lang::En) => "invalid message",
+        }
+    }
+}
+
+impl From<JoinError> for ErrorCode {
+    fn from(e: JoinError) -> Self {
+        match e {
+            JoinError::EmptyName => ErrorCode::NameEmpty,
+            JoinError::NameTooLong => ErrorCode::NameTooLong,
+            JoinError::NameTaken => ErrorCode::NameTaken,
+            JoinError::LobbyFull => ErrorCode::LobbyFull,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GamePhase {
+    Lobby,
+    Question,
+    Reveal,
+    Ended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerInfo {
+    pub id: u32,
+    pub name: String,
+    pub is_host: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScoreEntry {
+    pub player_id: u32,
+    pub name: String,
+    pub score: u32,
+    /// Only meaningful inside `Reveal` (0 / `None` elsewhere).
+    pub gained: u32,
+    pub choice: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RankEntry {
+    pub rank: u32,
+    pub player_id: u32,
+    pub name: String,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Anti-cheat: deliberately has no `correct` nor `explanation`; they only travel in
+/// `ServerMsg::Reveal`. Keep it that way.
+pub struct PublicQuestion {
+    pub id: u32,
+    pub index: usize,
+    pub total: usize,
+    pub prompt: String,
+    pub choices: Vec<String>,
+    pub time_limit_secs: Option<u32>,
+    pub remaining_ms: Option<u64>,
+}
+
+impl PublicQuestion {
+    pub(crate) fn from_question(
+        q: &Question,
+        index: usize,
+        total: usize,
+        time_limit_secs: Option<u32>,
+        remaining_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            id: q.id,
+            index,
+            total,
+            prompt: q.prompt.clone(),
+            choices: q.choices.clone(),
+            time_limit_secs,
+            remaining_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ClientMsg {
+    Join { name: String, protocol_version: u32 },
+    Answer { question_id: u32, choice: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ServerMsg {
+    Welcome {
+        protocol_version: u32,
+        player_id: u32,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+    /// Also sent mid-game on every join/leave: a plain player-list refresh, not a phase
+    /// change. `phase` tells a late joiner where the game is.
+    Lobby {
+        players: Vec<PlayerInfo>,
+        phase: GamePhase,
+    },
+    Question(PublicQuestion),
+    Reveal {
+        question_id: u32,
+        correct: usize,
+        explanation: String,
+        scores: Vec<ScoreEntry>,
+    },
+    End {
+        ranking: Vec<RankEntry>,
+    },
+    /// Explicit phase change after the end; a `Lobby` follows right away.
+    BackToLobby,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_msg_never_contains_answer_or_explanation() {
+        let q = Question {
+            id: 3,
+            prompt: "Capitale ?".into(),
+            choices: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            correct: 2,
+            explanation: "EXPLICATION_SECRETE".into(),
+        };
+        let msg = ServerMsg::Question(PublicQuestion::from_question(
+            &q,
+            0,
+            5,
+            Some(20),
+            Some(20_000),
+        ));
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("correct"), "{json}");
+        assert!(!json.contains("explanation"), "{json}");
+        assert!(!json.contains("EXPLICATION_SECRETE"), "{json}");
+        assert!(json.contains("Capitale ?"));
+        assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn error_codes_have_both_messages_and_roundtrip() {
+        use ErrorCode::*;
+        for c in [
+            VersionMismatch,
+            NameTaken,
+            NameEmpty,
+            NameTooLong,
+            LobbyFull,
+            ExpectedJoin,
+            InvalidMessage,
+        ] {
+            let (fr, en) = (c.message(Lang::Fr), c.message(Lang::En));
+            assert!(!fr.is_empty() && !en.is_empty() && fr != en, "{c:?}");
+            let m = ServerMsg::Error {
+                code: c,
+                message: fr.into(),
+            };
+            let s = serde_json::to_string(&m).unwrap();
+            assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), m);
+        }
+    }
+
+    #[test]
+    fn join_errors_map_to_codes() {
+        assert_eq!(ErrorCode::from(JoinError::NameTaken), ErrorCode::NameTaken);
+        assert_eq!(ErrorCode::from(JoinError::EmptyName), ErrorCode::NameEmpty);
+        assert_eq!(
+            ErrorCode::from(JoinError::NameTooLong),
+            ErrorCode::NameTooLong
+        );
+        assert_eq!(ErrorCode::from(JoinError::LobbyFull), ErrorCode::LobbyFull);
+    }
+
+    #[test]
+    fn messages_roundtrip() {
+        let m = ClientMsg::Join {
+            name: "A".into(),
+            protocol_version: 1,
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMsg>(&s).unwrap(), m);
+        let m = ServerMsg::Welcome {
+            protocol_version: 1,
+            player_id: 4,
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), m);
+    }
+}

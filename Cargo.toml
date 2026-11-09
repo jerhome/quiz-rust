@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/quiz-core", "crates/quiz-llm", "crates/quiz-net", "crates/quiz-app"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

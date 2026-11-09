@@ -1,0 +1,10 @@
+pub mod generating;
+pub mod home;
+pub mod join;
+pub mod lobby;
+pub mod multi;
+pub mod question;
+pub mod reveal;
+pub mod score;
+pub mod settings;
+pub mod setup;

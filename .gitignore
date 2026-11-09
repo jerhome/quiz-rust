@@ -1,0 +1,8 @@
+/target
+config.toml
+.env
+
+# Claude Code
+CLAUDE.md
+CLAUDE.local.md
+.claude/
