@@ -122,6 +122,7 @@ pub struct QuizApp {
     pub confirm_quit: bool,
     confirm_restart: bool,
     pub restart_failed: bool,
+    pub link_failed: bool,
     /// Selection for which the user chose "Later" (banner hidden until the choice changes).
     pub restart_dismissed: Option<crate::backend::Backend>,
     pub active_backend: crate::backend::Active,
@@ -159,6 +160,7 @@ impl QuizApp {
             confirm_quit: false,
             confirm_restart: false,
             restart_failed: false,
+            link_failed: false,
             restart_dismissed: None,
             active_backend,
             quitting: false,
@@ -597,6 +599,7 @@ impl eframe::App for QuizApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         crate::chrome::header(ctx, self, screen);
+        crate::chrome::footer(ctx, self);
         self.show_quit_confirmation(ctx);
         let frame = egui::Frame::NONE.fill(crate::theme::BG);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {

@@ -65,6 +65,68 @@ pub fn header(ctx: &egui::Context, app: &mut QuizApp, screen: Screen) {
         });
 }
 
+pub fn footer(ctx: &egui::Context, app: &mut QuizApp) {
+    let lang = app.lang();
+    let frame = egui::Frame::NONE
+        .fill(theme::BG)
+        .inner_margin(egui::Margin {
+            left: 20,
+            right: 20,
+            top: 6,
+            bottom: 8,
+        });
+    egui::TopBottomPanel::bottom("footer")
+        .frame(frame)
+        .show_separator_line(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if version_link(ui, lang) {
+                    app.link_failed =
+                        crate::links::open_url(&crate::links::current_release_url()).is_err();
+                }
+                if app.link_failed {
+                    ui.label(
+                        egui::RichText::new(t(lang, Key::OpenFailed))
+                            .size(theme::SIZE_CAPTION)
+                            .color(theme::WARNING),
+                    );
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let credit = egui::RichText::new(t(lang, Key::MadeBy))
+                        .size(theme::SIZE_CAPTION)
+                        .color(theme::TEXT_DIM);
+                    // Truncates instead of overlapping the version on a narrow window.
+                    ui.add(egui::Label::new(credit).truncate());
+                });
+            });
+        });
+}
+
+/// Clickable version label; returns true when clicked.
+fn version_link(ui: &mut egui::Ui, lang: Lang) -> bool {
+    let text = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let font = egui::FontId::proportional(theme::SIZE_CAPTION);
+    let galley = ui.painter().layout_no_wrap(text, font, theme::TEXT_DIM);
+    let (rect, resp) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
+    let hovered = resp.hovered();
+    let color = if hovered {
+        theme::ACCENT_HOVER
+    } else {
+        theme::TEXT_DIM
+    };
+    ui.painter().galley(rect.min, galley, color);
+    if hovered {
+        let y = rect.bottom();
+        ui.painter().line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(1.0_f32, color),
+        );
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(t(lang, Key::ViewRelease))
+        .clicked()
+}
+
 pub fn confirm_modal(
     ctx: &egui::Context,
     kind: QuitKind,

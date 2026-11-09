@@ -148,6 +148,9 @@ keys! {
     TopicRemove => ("Retirer de mes thèmes", "Remove from my topics"),
     TopicsSelected => ("{} thèmes sélectionnés", "{} topics selected"),
     TopicNone => ("Choisissez au moins un thème", "Pick at least one topic"),
+    ViewRelease => ("Voir la release sur GitHub", "View release on GitHub"),
+    MadeBy => ("Créé par Jerome Lamartiniere · avec Claude Code", "Made by Jerome Lamartiniere · with Claude Code"),
+    OpenFailed => ("Impossible d'ouvrir le navigateur.", "Could not open the browser."),
     ForgetSaved => ("Oublier la clé enregistrée", "Forget the saved key"),
     SaveFailed => ("Enregistrement des réglages impossible.", "Could not save settings."),
 }

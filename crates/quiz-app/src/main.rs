@@ -5,6 +5,7 @@ mod app;
 mod backend;
 mod chrome;
 mod i18n;
+mod links;
 mod multi;
 mod screens;
 mod settings;
