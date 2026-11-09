@@ -25,6 +25,10 @@ pub struct Settings {
     pub time_limit_secs: u32,
     pub name: String,
     pub remember_key: bool,
+    /// Last selected catalogue topics (ids), last selected free topics, and the saved free topics.
+    pub selected_themes: Vec<String>,
+    pub selected_custom: Vec<String>,
+    pub custom_themes: Vec<String>,
     #[serde(deserialize_with = "crate::backend::deserialize_lenient")]
     pub display_backend: crate::backend::Backend,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +67,9 @@ impl Default for Settings {
             time_limit_secs: 20,
             name: String::new(),
             remember_key: false,
+            selected_themes: Vec::new(),
+            selected_custom: Vec::new(),
+            custom_themes: Vec::new(),
             display_backend: crate::backend::Backend::X11,
             api_key: None,
         }
@@ -236,6 +243,9 @@ mod tests {
             time_limit_secs: 0,
             name: "Zoé".into(),
             remember_key: true,
+            selected_themes: vec!["history".into()],
+            selected_custom: vec!["Volcans".into()],
+            custom_themes: vec!["Volcans".into(), "Chats".into()],
             display_backend: crate::backend::Backend::Wayland,
             api_key: Some("sk-test".into()),
         }

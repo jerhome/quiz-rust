@@ -212,6 +212,73 @@ pub fn segmented<T: PartialEq + Copy>(
     changed
 }
 
+pub struct ChipOut {
+    pub clicked: bool,
+    pub removed: bool,
+}
+
+/// Rounded topic chip. A `removable` chip shows a small cross with its own click target.
+pub fn chip(ui: &mut Ui, label: &str, selected: bool, removable: bool) -> ChipOut {
+    let font = FontId::proportional(t::SIZE_BODY - 1.5);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), t::TEXT)
+        .size()
+        .x;
+    let x_w = if removable { 22.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(text_w + 28.0 + x_w, 34.0), Sense::click());
+    let k = ui
+        .ctx()
+        .animate_value_with_time(resp.id, f32::from(resp.hovered()), 0.12);
+    let (fill, border, text) = if selected {
+        (
+            t::ACCENT.lerp_to_gamma(t::ACCENT_HOVER, k),
+            t::ACCENT,
+            Color32::WHITE,
+        )
+    } else {
+        (
+            t::SURFACE_2.lerp_to_gamma(t::BORDER, k * 0.6),
+            t::BORDER.lerp_to_gamma(t::ACCENT, k),
+            t::TEXT,
+        )
+    };
+    let r = egui::CornerRadius::same(17);
+    let p = ui.painter();
+    p.rect_filled(rect, r, fill);
+    p.rect_stroke(rect, r, Stroke::new(1.0_f32, border), StrokeKind::Inside);
+    p.text(
+        pos2(rect.left() + 14.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        text,
+    );
+    let mut removed = false;
+    if removable {
+        let c = pos2(rect.right() - 17.0, rect.center().y);
+        let hit = Rect::from_center_size(c, vec2(22.0, 22.0));
+        let x_resp = ui
+            .interact(hit, resp.id.with("remove"), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
+        let s = Stroke::new(
+            1.6_f32,
+            text.gamma_multiply(if x_resp.hovered() { 1.0 } else { 0.7 }),
+        );
+        let p = ui.painter();
+        p.line_segment([c + vec2(-3.5, -3.5), c + vec2(3.5, 3.5)], s);
+        p.line_segment([c + vec2(-3.5, 3.5), c + vec2(3.5, -3.5)], s);
+        removed = x_resp.clicked();
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    ChipOut {
+        clicked: resp.clicked() && !removed,
+        removed,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GhostIcon {
     None,

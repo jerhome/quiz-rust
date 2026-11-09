@@ -9,6 +9,7 @@ mod multi;
 mod screens;
 mod settings;
 mod theme;
+mod themes;
 mod widgets;
 
 use eframe::egui;

@@ -5,7 +5,8 @@ use crate::app::{QuizApp, Route};
 use crate::i18n::{t, tf, Key, Msg};
 use crate::settings::Settings;
 use crate::theme;
-use crate::widgets::{self, ButtonKind};
+use crate::themes::{self, Pick, ThemePicker};
+use crate::widgets::{self, ButtonKind, GhostIcon};
 
 pub const TIME_CHOICES: [Option<u32>; 7] = [
     Some(10),
@@ -35,7 +36,7 @@ pub fn time_from_settings(secs: u32) -> Option<u32> {
 }
 
 pub struct SetupForm {
-    pub theme: String,
+    pub picker: ThemePicker,
     pub difficulty: Difficulty,
     pub count: u8,
     pub api_key: String,
@@ -48,7 +49,11 @@ pub struct SetupForm {
 impl SetupForm {
     pub fn from_settings(s: &Settings, api_key: String) -> Self {
         Self {
-            theme: String::new(),
+            picker: ThemePicker::from_saved(
+                &s.selected_themes,
+                &s.selected_custom,
+                &s.custom_themes,
+            ),
             difficulty: s.difficulty,
             count: s.count,
             api_key,
@@ -66,7 +71,7 @@ impl SetupForm {
 
     pub fn config(&self, language: Lang) -> QuizConfig {
         QuizConfig {
-            theme: self.theme.trim().to_string(),
+            theme: self.picker.topic_string(language),
             difficulty: self.difficulty,
             count: self.count,
             language,
@@ -85,10 +90,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
     widgets::heading(ui, t(lang, title), Some(t(lang, sub)));
     let mut submit = false;
     widgets::card(ui, |ui| {
-        widgets::field_label(ui, t(lang, Key::Topic));
-        let hint = t(lang, Key::TopicHint);
-        let theme = widgets::text_field(ui, &mut app.form.theme, hint, false);
-        submit = theme.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        topic_picker(ui, &mut app.form.picker, lang);
         widgets::field_label(ui, t(lang, Key::Difficulty));
         let opts: Vec<_> = Difficulty::ALL
             .iter()
@@ -110,13 +112,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
         }
     });
     ui.add_space(theme::GAP);
+    ui.label(theme::dim(selection_summary(&app.form.picker, lang)));
     let w = ui.available_width();
     ui.horizontal(|ui| {
-        let gen = widgets::button(
+        let can_generate = !app.form.picker.picks.is_empty();
+        let gen = widgets::button_enabled(
             ui,
             t(lang, Key::Generate),
             ButtonKind::Primary,
             Some(w * 0.66),
+            can_generate,
         );
         if gen.clicked() {
             submit = true;
@@ -126,8 +131,116 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
             app.leave_setup();
         }
     });
-    if submit {
+    if submit && !app.form.picker.picks.is_empty() {
         app.submit_setup(ui.ctx());
+    }
+}
+
+enum ChipAction {
+    Toggle(Pick),
+    RemoveCustom(String),
+    AddQuery,
+    ToggleCategory(&'static themes::Category),
+}
+
+fn selection_summary(picker: &ThemePicker, lang: Lang) -> String {
+    match picker.picks.len() {
+        0 => t(lang, Key::TopicNone).to_string(),
+        1..=4 => picker
+            .picks
+            .iter()
+            .map(|p| picker.label(p, lang))
+            .collect::<Vec<_>>()
+            .join(", "),
+        n => tf(lang, Key::TopicsSelected, &[&n.to_string()]),
+    }
+}
+
+// Search box + chips grouped by category; free text that matches nothing becomes an "add" chip.
+fn topic_picker(ui: &mut egui::Ui, picker: &mut ThemePicker, lang: Lang) {
+    let mut bulk = None;
+    ui.horizontal(|ui| {
+        widgets::field_label(ui, t(lang, Key::Topic));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let clear = widgets::ghost_button(ui, t(lang, Key::TopicClear), GhostIcon::None);
+            if clear.clicked() {
+                bulk = Some(false);
+            }
+            let all = widgets::ghost_button(ui, t(lang, Key::TopicSelectAll), GhostIcon::None);
+            if all.clicked() {
+                bulk = Some(true);
+            }
+        });
+    });
+    match bulk {
+        Some(true) => picker.select_all(),
+        Some(false) => picker.clear(),
+        None => {}
+    }
+    let search = widgets::text_field(ui, &mut picker.query, t(lang, Key::TopicSearchHint), false);
+    if search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        picker.submit_query();
+        search.request_focus();
+    }
+    let mut action = None;
+    let custom = picker.filtered_custom();
+    if !custom.is_empty() {
+        ui.label(theme::dim(t(lang, Key::CatMine)));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            for c in custom {
+                let pick = Pick::Custom(c.clone());
+                let selected = picker.is_selected(&pick);
+                let out = widgets::chip(ui, c, selected, true);
+                if out.removed {
+                    action = Some(ChipAction::RemoveCustom(c.clone()));
+                } else if out.clicked {
+                    action = Some(ChipAction::Toggle(pick));
+                }
+            }
+        });
+    }
+    for cat in themes::CATEGORIES {
+        let visible: Vec<_> = cat
+            .themes
+            .iter()
+            .filter(|th| themes::theme_matches(th, &picker.query))
+            .collect();
+        if visible.is_empty() {
+            continue;
+        }
+        let title = egui::Label::new(theme::dim(t(lang, cat.title))).sense(egui::Sense::click());
+        if ui
+            .add(title)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            action = Some(ChipAction::ToggleCategory(cat));
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            for th in visible {
+                let pick = Pick::Catalog(th.id);
+                let selected = picker.is_selected(&pick);
+                let label = th.label(lang);
+                if widgets::chip(ui, label, selected, false).clicked {
+                    action = Some(ChipAction::Toggle(pick));
+                }
+            }
+        });
+    }
+    if picker.can_add_query() {
+        let label = tf(lang, Key::TopicAdd, &[picker.query.trim()]);
+        if widgets::chip(ui, &label, false, false).clicked {
+            action = Some(ChipAction::AddQuery);
+        }
+    }
+    match action {
+        Some(ChipAction::Toggle(p)) => picker.toggle(p),
+        Some(ChipAction::RemoveCustom(c)) => picker.remove_custom(&c),
+        Some(ChipAction::AddQuery) => picker.submit_query(),
+        Some(ChipAction::ToggleCategory(c)) => picker.toggle_category(c),
+        None => {}
     }
 }
 
@@ -186,7 +299,7 @@ mod tests {
     #[test]
     fn config_depuis_formulaire() {
         let mut f = SetupForm::from_settings(&Settings::default(), "k".into());
-        f.theme = "  Rome ".into();
+        f.picker.add_custom("  Rome ");
         f.count = 8;
         let c = f.config(Lang::En);
         assert_eq!(c.theme, "Rome");

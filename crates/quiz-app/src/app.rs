@@ -459,6 +459,9 @@ impl QuizApp {
         s.count = self.form.count;
         s.time_limit_secs = self.form.time_limit.unwrap_or(0);
         s.name = self.form.name.trim().to_string();
+        s.selected_themes = self.form.picker.catalog_ids();
+        s.selected_custom = self.form.picker.selected_custom();
+        s.custom_themes = self.form.picker.custom.clone();
         let key = self.form.api_key.trim();
         s.api_key = settings::key_to_persist(
             s.remember_key,
