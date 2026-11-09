@@ -1,3 +1,6 @@
+// No console window behind the GUI in Windows release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod chrome;
 mod i18n;

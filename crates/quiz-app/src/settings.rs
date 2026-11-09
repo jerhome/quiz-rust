@@ -1,8 +1,9 @@
-// Settings are stored in ~/.config/quiz-rust/config.toml. The API key is written only
+// Settings are stored in ~/.config/quiz-rust/config.toml (%APPDATA%\quiz-rust on Windows). The API key is written only
 // when the user ticked "remember"; neither the key nor the file contents are ever logged.
 
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -96,11 +97,18 @@ pub fn config_path_from(xdg: Option<&str>, home: Option<&str>) -> Option<PathBuf
     Some(base.join("quiz-rust").join("config.toml"))
 }
 
+pub fn config_path_windows(appdata: Option<&str>) -> Option<PathBuf> {
+    let base = appdata.filter(|a| !a.is_empty())?;
+    Some(PathBuf::from(base).join("quiz-rust").join("config.toml"))
+}
+
 pub fn config_path() -> Option<PathBuf> {
-    config_path_from(
-        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-    )
+    let var = |name: &str| std::env::var(name).ok();
+    if cfg!(windows) {
+        config_path_windows(var("APPDATA").as_deref())
+    } else {
+        config_path_from(var("XDG_CONFIG_HOME").as_deref(), var("HOME").as_deref())
+    }
 }
 
 pub fn load_from(path: &Path) -> Settings {
@@ -121,23 +129,20 @@ pub fn load_from(path: &Path) -> Settings {
 }
 
 // Atomic write: a temp file created with mode 0600 (never readable by others, even briefly)
-// in a 0700 directory, then renamed over the target.
+// in a 0700 directory, then renamed over the target. On Windows the per-user profile is
+// already private and `fs::rename` replaces an existing file (MoveFileExW).
 pub fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| std::io::Error::other("chemin sans dossier"))?;
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    create_private_dir(dir)?;
     let text = settings
         .to_toml()
         .map_err(|_| std::io::Error::other("sérialisation impossible"))?;
     let tmp = dir.join(format!(".config.toml.{}.tmp", std::process::id()));
     let _ = fs::remove_file(&tmp);
     let result = (|| {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        let mut f = create_private_file(&tmp)?;
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         fs::rename(&tmp, path)
@@ -146,6 +151,27 @@ pub fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
 }
 
 // Initial value of the key field: ANTHROPIC_API_KEY > saved key > empty.
@@ -187,6 +213,7 @@ pub fn key_to_persist(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -233,6 +260,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn permissions_600_et_700() {
         let dir = temp_dir("perm");
@@ -297,6 +325,19 @@ mod tests {
         assert_eq!(initial_key(None, Some("saved")), "saved");
         assert_eq!(initial_key(Some("  "), Some("saved")), "saved");
         assert_eq!(initial_key(None, None), "");
+    }
+
+    #[test]
+    fn chemin_windows_appdata() {
+        let p = config_path_windows(Some("C:\\Users\\u\\AppData\\Roaming")).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("C:\\Users\\u\\AppData\\Roaming")
+                .join("quiz-rust")
+                .join("config.toml")
+        );
+        assert!(config_path_windows(Some("")).is_none());
+        assert!(config_path_windows(None).is_none());
     }
 
     #[test]

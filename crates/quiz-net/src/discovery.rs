@@ -75,8 +75,10 @@ pub async fn discover_on(port: u16, waker: Option<Waker>) -> Result<DiscoveryHan
     Ok(DiscoveryHandle { hosts: rx, task })
 }
 
-/// SO_REUSEADDR + SO_REUSEPORT let several instances on one machine listen on the same
-/// port (handy for local testing); broadcasts are delivered to each of them.
+/// Lets several instances on one machine listen on the same port (handy for local
+/// testing); broadcasts are delivered to each of them. On Unix this needs SO_REUSEPORT
+/// as well; on Windows SO_REUSEADDR alone already has that meaning for UDP and
+/// `set_reuse_port` does not exist.
 fn bind_shared(port: u16) -> Result<UdpSocket, NetError> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
@@ -84,6 +86,7 @@ fn bind_shared(port: u16) -> Result<UdpSocket, NetError> {
         Some(socket2::Protocol::UDP),
     )?;
     socket.set_reuse_address(true)?;
+    #[cfg(unix)]
     socket.set_reuse_port(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&SocketAddr::from(([0, 0, 0, 0], port)).into())?;
