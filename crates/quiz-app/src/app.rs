@@ -84,6 +84,16 @@ fn unusable(e: &quiz_core::QuizError) -> Msg {
     Msg::from_fn(|l| tf(l, Key::ErrUnusable, &[&e.message(l)]))
 }
 
+fn load_title_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/quiz-rust-32.png"))
+        .ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    Some(ctx.load_texture("title_icon", image, egui::TextureOptions::LINEAR))
+}
+
 fn waker(ctx: &egui::Context) -> Waker {
     let ctx = ctx.clone();
     std::sync::Arc::new(move || ctx.request_repaint())
@@ -123,6 +133,9 @@ pub struct QuizApp {
     confirm_restart: bool,
     pub restart_failed: bool,
     pub link_failed: bool,
+    /// No native title bar: our header is the title bar (Windows, Wayland).
+    pub custom_titlebar: bool,
+    pub title_icon: Option<egui::TextureHandle>,
     /// Selection for which the user chose "Later" (banner hidden until the choice changes).
     pub restart_dismissed: Option<crate::backend::Backend>,
     pub active_backend: crate::backend::Active,
@@ -161,6 +174,8 @@ impl QuizApp {
             confirm_restart: false,
             restart_failed: false,
             link_failed: false,
+            custom_titlebar: crate::backend::custom_titlebar(cfg!(windows), active_backend.backend),
+            title_icon: load_title_icon(ctx),
             restart_dismissed: None,
             active_backend,
             quitting: false,
@@ -624,6 +639,9 @@ impl eframe::App for QuizApp {
                 Screen::Score => screens::score::show(ui, self),
             });
         });
+        if self.custom_titlebar {
+            crate::chrome::window_frame(ctx);
+        }
     }
 }
 

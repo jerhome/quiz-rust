@@ -67,6 +67,12 @@ pub fn resolve(env: Option<&str>, setting: Backend, wayland_display: Option<&str
     }
 }
 
+/// Native decorations stay on X11 only: Windows and Wayland (client-side decorations that
+/// clash with the theme) get our own title bar instead.
+pub fn custom_titlebar(windows: bool, backend: Backend) -> bool {
+    windows || backend == Backend::Wayland
+}
+
 /// Whether the selected backend differs from what the running process uses.
 pub fn restart_needed(selected: Backend, active: Active) -> bool {
     if active.fell_back && selected == Backend::Wayland {
@@ -134,6 +140,13 @@ mod tests {
             );
         }
         assert!(!resolve(None, Backend::X11, None).fell_back);
+    }
+
+    #[test]
+    fn barre_de_titre_personnalisee() {
+        assert!(!custom_titlebar(false, Backend::X11));
+        assert!(custom_titlebar(false, Backend::Wayland));
+        assert!(custom_titlebar(true, Backend::X11));
     }
 
     #[test]

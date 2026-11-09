@@ -280,6 +280,49 @@ pub fn chip(ui: &mut Ui, label: &str, selected: bool, removable: bool) -> ChipOu
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindowIcon {
+    Minimize,
+    Maximize,
+    Restore,
+}
+
+/// Square icon-only button for the custom title bar.
+pub fn window_button(ui: &mut Ui, icon: WindowIcon, hint: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 34.0), Sense::click());
+    let k = ui
+        .ctx()
+        .animate_value_with_time(resp.id, f32::from(resp.hovered()), 0.12);
+    let color = t::TEXT_DIM.lerp_to_gamma(t::TEXT, k);
+    let p = ui.painter();
+    p.rect_filled(rect, t::radius(), t::SURFACE_2.gamma_multiply(k));
+    let c = rect.center();
+    let s = Stroke::new(1.5_f32, color);
+    match icon {
+        WindowIcon::Minimize => {
+            p.line_segment([c + vec2(-5.0, 4.0), c + vec2(5.0, 4.0)], s);
+        }
+        WindowIcon::Maximize => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(11.0, 11.0)),
+                2.0,
+                s,
+                StrokeKind::Inside,
+            );
+        }
+        WindowIcon::Restore => {
+            // Two overlapping squares: the back one is only partly visible.
+            let back = Rect::from_center_size(c + vec2(2.0, -2.0), vec2(9.0, 9.0));
+            let front = Rect::from_center_size(c + vec2(-1.5, 1.5), vec2(9.0, 9.0));
+            p.line_segment([back.left_top() + vec2(3.5, 0.0), back.right_top()], s);
+            p.line_segment([back.right_top(), back.right_bottom() - vec2(0.0, 3.5)], s);
+            p.rect_stroke(front, 2.0, s, StrokeKind::Inside);
+        }
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(hint)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GhostIcon {
     None,
     Close,
@@ -297,9 +340,15 @@ pub fn ghost_button(ui: &mut Ui, text: &str, icon: GhostIcon) -> Response {
     let k = ui
         .ctx()
         .animate_value_with_time(resp.id, f32::from(resp.hovered()), 0.12);
-    let color = t::TEXT_DIM.lerp_to_gamma(t::TEXT, k);
+    // Closing gets a discreet coral hover.
+    let (hover_fill, hover_text) = if icon == GhostIcon::Close {
+        (t::tint(t::DANGER, 0.2), t::DANGER)
+    } else {
+        (t::SURFACE_2, t::TEXT)
+    };
+    let color = t::TEXT_DIM.lerp_to_gamma(hover_text, k);
     let p = ui.painter();
-    p.rect_filled(rect, t::radius(), t::SURFACE_2.gamma_multiply(k));
+    p.rect_filled(rect, t::radius(), hover_fill.gamma_multiply(k));
     let mut x = rect.left() + 14.0;
     if icon == GhostIcon::Close {
         let c = pos2(x + 5.0, rect.center().y);

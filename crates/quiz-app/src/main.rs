@@ -64,11 +64,19 @@ fn apply_backend(_options: &mut eframe::NativeOptions, _backend: backend::Backen
 
 fn run(active: backend::Active) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Quiz Rust")
+        .with_app_id("quiz-rust")
+        .with_inner_size([960.0, 720.0])
+        .with_min_inner_size([560.0, 520.0])
+        .with_decorations(!backend::custom_titlebar(cfg!(windows), active.backend));
+    // A bad icon must never prevent the window from opening.
+    match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/quiz-rust-256.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(_) => tracing::warn!("could not decode the application icon"),
+    }
     let mut options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Quiz Rust")
-            .with_inner_size([960.0, 720.0])
-            .with_min_inner_size([560.0, 520.0]),
+        viewport,
         ..Default::default()
     };
     apply_backend(&mut options, active.backend);

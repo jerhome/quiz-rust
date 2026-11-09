@@ -151,6 +151,9 @@ keys! {
     ViewRelease => ("Voir la release sur GitHub", "View release on GitHub"),
     MadeBy => ("Créé par Jerome Lamartiniere · avec Claude Code", "Made by Jerome Lamartiniere · with Claude Code"),
     OpenFailed => ("Impossible d'ouvrir le navigateur.", "Could not open the browser."),
+    Minimize => ("Réduire", "Minimize"),
+    Maximize => ("Agrandir", "Maximize"),
+    Restore => ("Restaurer", "Restore"),
     ForgetSaved => ("Oublier la clé enregistrée", "Forget the saved key"),
     SaveFailed => ("Enregistrement des réglages impossible.", "Could not save settings."),
 }

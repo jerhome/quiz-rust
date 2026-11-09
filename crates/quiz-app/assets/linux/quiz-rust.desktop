@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Quiz Rust
+Comment=AI-generated quizzes, solo or on your local network
+Exec=quiz-rust
+Icon=quiz-rust
+Terminal=false
+Categories=Game;Education;
+StartupWMClass=quiz-rust
