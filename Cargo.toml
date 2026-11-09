@@ -4,7 +4,7 @@ members = ["crates/quiz-core", "crates/quiz-llm", "crates/quiz-net", "crates/qui
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 license = "MIT"
 
 [workspace.lints.rust]

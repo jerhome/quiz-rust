@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "quiz-app"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "quiz-core"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "quiz-llm"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "quiz-core",
  "reqwest",
@@ -2197,7 +2197,7 @@ dependencies = [
 
 [[package]]
 name = "quiz-net"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "quiz-core",
  "serde",
