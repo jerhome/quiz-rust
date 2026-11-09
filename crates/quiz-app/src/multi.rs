@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use quiz_core::Question;
@@ -6,8 +6,8 @@ use quiz_core::Question;
 use crate::i18n::{tf, Key, Msg};
 use quiz_net::game::RevealInfo;
 use quiz_net::{
-    ClientEvent, ClientHandle, DiscoveredHost, GamePhase, HostEvent, HostHandle, PlayerInfo,
-    PublicQuestion, RankEntry, ScoreEntry, ServerMsg, DEFAULT_PORT, HOST_ID,
+    local_ipv4_addrs, ClientEvent, ClientHandle, DiscoveredHost, GamePhase, HostEvent, HostHandle,
+    LocalAddr, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry, ServerMsg, DEFAULT_PORT, HOST_ID,
 };
 
 // Discovery has no "host gone" event: hosts not seen for this long are hidden.
@@ -82,9 +82,7 @@ pub fn from_host_event(e: HostEvent) -> NetUpdate {
 pub fn from_server_msg(m: ServerMsg) -> NetUpdate {
     match m {
         ServerMsg::Welcome { .. } => NetUpdate::Ignore,
-        ServerMsg::Error { code, .. } => {
-            NetUpdate::Fatal(Msg::from_fn(|l| code.message(l).to_string()))
-        }
+        ServerMsg::Error { code, .. } => NetUpdate::Fatal(code_message(code)),
         ServerMsg::Lobby { players, phase } => NetUpdate::Lobby {
             players,
             phase: Some(phase),
@@ -137,7 +135,7 @@ pub struct Session {
     pub game_phase: Option<GamePhase>,
     time_limit: Option<Duration>,
     pub port: u16,
-    pub local_ip: Option<IpAddr>,
+    pub addrs: Vec<LocalAddr>,
 }
 
 impl Session {
@@ -159,7 +157,7 @@ impl Session {
             game_phase: None,
             time_limit: None,
             port,
-            local_ip: None,
+            addrs: Vec::new(),
         }
     }
 
@@ -178,7 +176,7 @@ impl Session {
         }];
         s.questions = questions;
         s.time_limit = time_limit;
-        s.local_ip = local_ip();
+        s.addrs = local_ipv4_addrs();
         s
     }
 
@@ -361,11 +359,29 @@ pub fn remaining_secs(left: Duration) -> u32 {
     u32::try_from(left.as_secs()).unwrap_or(u32::MAX) + u32::from(left.subsec_nanos() > 0)
 }
 
-// A UDP connect sends no packet; it only selects the outgoing route/interface.
-pub fn local_ip() -> Option<IpAddr> {
-    let s = UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("192.0.2.1:9").ok()?;
-    Some(s.local_addr().ok()?.ip())
+/// Address to give to players: the first real (non-virtual) interface.
+pub fn primary_addr(addrs: &[LocalAddr]) -> Option<&LocalAddr> {
+    addrs.iter().find(|a| !a.is_likely_virtual)
+}
+
+pub fn format_addr(ip: std::net::Ipv4Addr, port: u16) -> String {
+    format!("{ip}:{port}")
+}
+
+/// After this long without any discovered game, the join screen suggests typing the address.
+pub const NO_GAMES_HINT_AFTER: Duration = Duration::from_secs(5);
+
+pub fn show_no_games_hint(started: Instant, now: Instant, any_host: bool) -> bool {
+    !any_host && now.saturating_duration_since(started) >= NO_GAMES_HINT_AFTER
+}
+
+/// The host-side text for a version mismatch is replaced by a clearer one.
+pub fn code_message(code: quiz_net::ErrorCode) -> Msg {
+    if code == quiz_net::ErrorCode::VersionMismatch {
+        Msg::Key(Key::ErrVersion)
+    } else {
+        Msg::from_fn(|l| code.message(l).to_string())
+    }
 }
 
 pub fn parse_addr(input: &str) -> Result<SocketAddr, Msg> {
@@ -392,21 +408,17 @@ pub fn validate_name(input: &str) -> Result<String, Msg> {
     }
 }
 
-pub fn upsert_host(list: &mut Vec<(DiscoveredHost, Instant)>, host: DiscoveredHost, now: Instant) {
-    match list.iter_mut().find(|(h, _)| h.addr == host.addr) {
-        Some(entry) => *entry = (host, now),
-        None => list.push((host, now)),
+// Hosts are re-emitted on every announcement, so the newest entry replaces the old one.
+pub fn upsert_host(list: &mut Vec<DiscoveredHost>, host: DiscoveredHost) {
+    match list.iter_mut().find(|h| h.addr == host.addr) {
+        Some(entry) => *entry = host,
+        None => list.push(host),
     }
 }
 
-pub fn visible_hosts(
-    list: &[(DiscoveredHost, Instant)],
-    now: Instant,
-    ttl: Duration,
-) -> Vec<&DiscoveredHost> {
+pub fn visible_hosts(list: &[DiscoveredHost], now: Instant, ttl: Duration) -> Vec<&DiscoveredHost> {
     list.iter()
-        .filter(|(_, seen)| now.saturating_duration_since(*seen) <= ttl)
-        .map(|(h, _)| h)
+        .filter(|h| now.saturating_duration_since(h.last_seen) <= ttl)
         .collect()
 }
 
@@ -420,10 +432,11 @@ pub fn is_tied(ranking: &[RankEntry], entry: &RankEntry) -> bool {
 mod tests {
     use super::*;
 
-    fn host(name: &str, port: u16) -> DiscoveredHost {
+    fn host(name: &str, port: u16, last_seen: Instant) -> DiscoveredHost {
         DiscoveredHost {
             name: name.into(),
             addr: SocketAddr::new([192, 168, 1, 5].into(), port),
+            last_seen,
         }
     }
 
@@ -447,15 +460,56 @@ mod tests {
     fn hotes_expires_masques() {
         let now = Instant::now();
         let mut list = Vec::new();
-        upsert_host(&mut list, host("A", 1), now);
-        upsert_host(&mut list, host("B", 2), now + Duration::from_secs(5));
+        upsert_host(&mut list, host("A", 1, now));
+        upsert_host(&mut list, host("B", 2, now + Duration::from_secs(5)));
         let later = now + Duration::from_secs(8);
         let v = visible_hosts(&list, later, HOST_TTL);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].name, "B");
-        upsert_host(&mut list, host("A2", 1), later);
+        // a new announcement refreshes last_seen and keeps a single entry
+        upsert_host(&mut list, host("A2", 1, later));
         assert_eq!(list.len(), 2);
         assert_eq!(visible_hosts(&list, later, HOST_TTL).len(), 2);
+    }
+
+    fn la(ip: [u8; 4], name: &str, virt: bool) -> LocalAddr {
+        LocalAddr {
+            ip: ip.into(),
+            interface_name: name.into(),
+            is_likely_virtual: virt,
+        }
+    }
+
+    #[test]
+    fn adresse_principale() {
+        let list = vec![
+            la([10, 8, 0, 2], "tun0", true),
+            la([192, 168, 1, 20], "eth0", false),
+        ];
+        assert_eq!(primary_addr(&list).unwrap().interface_name, "eth0");
+        assert!(primary_addr(&[la([10, 8, 0, 2], "tun0", true)]).is_none());
+        assert!(primary_addr(&[]).is_none());
+        assert_eq!(
+            format_addr([192, 168, 1, 20].into(), 7878),
+            "192.168.1.20:7878"
+        );
+    }
+
+    #[test]
+    fn aide_aucune_partie() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        assert!(!show_no_games_hint(start, at(4), false));
+        assert!(show_no_games_hint(start, at(5), false));
+        assert!(!show_no_games_hint(start, at(30), true));
+    }
+
+    #[test]
+    fn message_version_differente() {
+        let m = code_message(quiz_net::ErrorCode::VersionMismatch);
+        assert!(m.text(quiz_core::Lang::Fr).contains("Version différente"));
+        assert!(m.text(quiz_core::Lang::En).contains("Different version"));
+        assert_ne!(code_message(quiz_net::ErrorCode::NameTaken), m);
     }
 
     fn pq(limit: Option<u32>, remaining_ms: Option<u64>) -> PublicQuestion {

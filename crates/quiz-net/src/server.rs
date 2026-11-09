@@ -1,12 +1,12 @@
-use crate::discovery::announce_loop;
+use crate::discovery::{announce_loop, AnnounceTarget};
 use crate::error::NetError;
 use crate::game::{Advance, Game, GameError, PlayerId, RevealInfo, HOST_ID};
-use crate::io::{read_line_limited, writer_loop};
+use crate::io::{enable_keepalive, read_line_limited, writer_loop, Beat};
 use crate::protocol::{
-    ClientMsg, ErrorCode, PlayerInfo, PublicQuestion, RankEntry, ServerMsg, DEFAULT_PORT,
-    DISCOVERY_PORT, PROTOCOL_VERSION,
+    ClientBeat, ClientMsg, ErrorCode, PlayerInfo, PublicQuestion, RankEntry, ServerMsg,
+    DEFAULT_PORT, DISCOVERY_PORT, PING_LINE, PROTOCOL_VERSION,
 };
-use crate::Waker;
+use crate::{HeartbeatConfig, Waker};
 use quiz_core::Question;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -30,6 +30,7 @@ pub struct HostConfig {
     pub discovery_port: u16,
     pub announce_ip: IpAddr,
     pub waker: Option<Waker>,
+    pub heartbeat: crate::HeartbeatConfig,
 }
 
 impl Default for HostConfig {
@@ -42,6 +43,7 @@ impl Default for HostConfig {
             discovery_port: DISCOVERY_PORT,
             announce_ip: IpAddr::V4(Ipv4Addr::BROADCAST),
             waker: None,
+            heartbeat: crate::HeartbeatConfig::default(),
         }
     }
 }
@@ -135,11 +137,20 @@ impl Host {
 
         // Announcement stays on for the whole session since joining is always allowed.
         let announcer = config.announce.then(|| {
-            let target = SocketAddr::new(config.announce_ip, config.discovery_port);
+            let target = if config.announce_ip == IpAddr::V4(Ipv4Addr::BROADCAST) {
+                AnnounceTarget::Lan(config.discovery_port)
+            } else {
+                AnnounceTarget::Fixed(SocketAddr::new(config.announce_ip, config.discovery_port))
+            };
             tokio::spawn(announce_loop(config.name.clone(), port, target))
         });
 
-        tokio::spawn(accept_loop(listener, cmd_tx.clone(), stop_rx));
+        tokio::spawn(accept_loop(
+            listener,
+            cmd_tx.clone(),
+            stop_rx,
+            config.heartbeat,
+        ));
         let actor = Actor {
             game,
             conns: HashMap::new(),
@@ -161,17 +172,19 @@ async fn accept_loop(
     listener: TcpListener,
     cmd: UnboundedSender<Cmd>,
     mut stop: watch::Receiver<bool>,
+    hb: HeartbeatConfig,
 ) {
     loop {
         tokio::select! {
             _ = stop.changed() => break,
             res = listener.accept() => match res {
                 Ok((stream, peer)) => {
-                    tracing::debug!(%peer, "connexion entrante");
-                    tokio::spawn(serve_conn(stream, cmd.clone(), stop.clone()));
+                    tracing::debug!(%peer, "incoming connection");
+                    enable_keepalive(&stream);
+                    tokio::spawn(serve_conn(stream, cmd.clone(), stop.clone(), hb));
                 }
                 Err(e) => {
-                    tracing::warn!("accept : {e}");
+                    tracing::warn!("accept: {e}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -179,10 +192,15 @@ async fn accept_loop(
     }
 }
 
-async fn serve_conn(stream: TcpStream, cmd: UnboundedSender<Cmd>, mut stop: watch::Receiver<bool>) {
+async fn serve_conn(
+    stream: TcpStream,
+    cmd: UnboundedSender<Cmd>,
+    mut stop: watch::Receiver<bool>,
+    hb: HeartbeatConfig,
+) {
     let (r, w) = stream.into_split();
     let (out_tx, out_rx) = unbounded_channel::<ServerMsg>();
-    let writer = tokio::spawn(writer_loop(w, out_rx));
+    let writer = tokio::spawn(writer_loop(w, out_rx, Beat::every(hb.interval, PING_LINE)));
     let mut reader = BufReader::new(r);
 
     let id = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&mut reader, &out_tx, &cmd))
@@ -200,9 +218,10 @@ async fn serve_conn(stream: TcpStream, cmd: UnboundedSender<Cmd>, mut stop: watc
     loop {
         let line = tokio::select! {
             _ = stop.changed() => break,
-            l = read_line_limited(&mut reader) => l,
+            // Anything received (pongs included) proves the player is alive.
+            l = tokio::time::timeout(hb.idle_timeout, read_line_limited(&mut reader)) => l,
         };
-        let Ok(Some(line)) = line else { break };
+        let Ok(Ok(Some(line))) = line else { break };
         match serde_json::from_str::<ClientMsg>(&line) {
             Ok(ClientMsg::Answer {
                 question_id,
@@ -214,6 +233,7 @@ async fn serve_conn(stream: TcpStream, cmd: UnboundedSender<Cmd>, mut stop: watc
                     choice,
                 });
             }
+            Err(_) if serde_json::from_str::<ClientBeat>(&line).is_ok() => {}
             Ok(ClientMsg::Join { .. }) | Err(_) => {
                 let _ = out_tx.send(error_msg(ErrorCode::InvalidMessage));
                 break;

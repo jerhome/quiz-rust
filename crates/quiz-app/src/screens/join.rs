@@ -5,7 +5,7 @@ use quiz_net::{DiscoveredHost, DiscoveryHandle};
 
 use crate::app::QuizApp;
 use crate::i18n::{t, Key, Msg};
-use crate::multi::{parse_addr, upsert_host, visible_hosts, HOST_TTL};
+use crate::multi::{parse_addr, show_no_games_hint, upsert_host, visible_hosts, HOST_TTL};
 use crate::theme;
 use crate::widgets::{self, ButtonKind};
 
@@ -15,14 +15,16 @@ pub struct JoinState {
     pub error: Option<Msg>,
     pub connecting: bool,
     pub discovery: Option<DiscoveryHandle>,
-    hosts: Vec<(DiscoveredHost, Instant)>,
+    hosts: Vec<DiscoveredHost>,
+    pub started: Option<Instant>,
+    focused_for_hint: bool,
 }
 
 impl JoinState {
-    pub fn drain_hosts(&mut self, now: Instant) {
+    pub fn drain_hosts(&mut self) {
         let Some(d) = &mut self.discovery else { return };
         while let Ok(h) = d.hosts.try_recv() {
-            upsert_host(&mut self.hosts, h, now);
+            upsert_host(&mut self.hosts, h);
         }
     }
 
@@ -48,10 +50,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
         theme::SIZE_SUBTITLE,
     ));
     let hosts = app.join.visible();
+    let show_hint = app
+        .join
+        .started
+        .is_some_and(|s| show_no_games_hint(s, Instant::now(), !hosts.is_empty()));
     if hosts.is_empty() {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(18.0).color(theme::ACCENT));
             ui.label(theme::dim(t(lang, Key::Searching)));
+        });
+    }
+    if show_hint {
+        // A soft hint, not an error: discovery is often blocked on corporate networks.
+        widgets::card_styled(ui, theme::tint(theme::ACCENT, 0.08), theme::BORDER, |ui| {
+            ui.label(t(lang, Key::NoGamesFound));
         });
     }
     for h in &hosts {
@@ -64,7 +76,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
         widgets::field_label(ui, t(lang, Key::ManualConnect));
         ui.horizontal(|ui| {
             let w = ui.available_width() - 160.0 - theme::GAP;
-            widgets::text_field_w(ui, &mut app.join.manual_addr, "192.168.1.5:7878", false, w);
+            let field =
+                widgets::text_field_w(ui, &mut app.join.manual_addr, "192.168.1.5:7878", false, w);
+            if show_hint && !app.join.focused_for_hint {
+                field.request_focus();
+                app.join.focused_for_hint = true;
+            }
             let b = widgets::button_enabled(
                 ui,
                 t(lang, Key::Connect),

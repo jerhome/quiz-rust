@@ -3,7 +3,7 @@ use quiz_core::{Lang, Question};
 use serde::{Deserialize, Serialize};
 
 /// Bump on any wire change; the host refuses clients with another version.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const DEFAULT_PORT: u16 = 7878;
 pub const DISCOVERY_PORT: u16 = 7879;
 /// Bounds per-connection memory: a longer line drops the connection.
@@ -159,6 +159,23 @@ pub enum ServerMsg {
     BackToLobby,
 }
 
+/// Heartbeat lines are handled inside the connection tasks and never surface in
+/// `ServerMsg`/`ClientMsg`, so the UI does not have to know about them.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum ServerBeat {
+    Ping,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum ClientBeat {
+    Pong,
+}
+
+pub(crate) const PING_LINE: &[u8] = b"{\"type\":\"Ping\"}\n";
+pub(crate) const PONG_LINE: &[u8] = b"{\"type\":\"Pong\"}\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +236,16 @@ mod tests {
             ErrorCode::NameTooLong
         );
         assert_eq!(ErrorCode::from(JoinError::LobbyFull), ErrorCode::LobbyFull);
+    }
+
+    #[test]
+    fn heartbeat_lines_parse_as_beats_not_messages() {
+        let ping = std::str::from_utf8(PING_LINE).unwrap();
+        assert!(serde_json::from_str::<ServerMsg>(ping).is_err());
+        assert!(serde_json::from_str::<ServerBeat>(ping).is_ok());
+        let pong = std::str::from_utf8(PONG_LINE).unwrap();
+        assert!(serde_json::from_str::<ClientMsg>(pong).is_err());
+        assert!(serde_json::from_str::<ClientBeat>(pong).is_ok());
     }
 
     #[test]

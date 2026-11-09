@@ -271,6 +271,7 @@ impl QuizApp {
         self.go_home(None);
         self.route = route;
         if route == Route::Join {
+            self.join.started = Some(Instant::now());
             self.start_discovery(ctx);
         }
     }
@@ -368,6 +369,9 @@ impl QuizApp {
                     self.session = Some(Session::new_client(handle));
                     self.join.discovery = None;
                 }
+                Err(quiz_net::NetError::Rejected(code)) => {
+                    self.join.error = Some(multi::code_message(code));
+                }
                 Err(e) => self.join.error = Some(Msg::from_fn(|l| e.message(l))),
             }
         }
@@ -383,7 +387,7 @@ impl QuizApp {
                 }
             }
         }
-        self.join.drain_hosts(Instant::now());
+        self.join.drain_hosts();
         if let Some(msg) = self.session.as_mut().and_then(Session::drain) {
             self.go_home(Some(msg));
         }

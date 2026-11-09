@@ -5,7 +5,9 @@ mod client;
 mod discovery;
 mod error;
 pub mod game;
+mod heartbeat;
 mod io;
+mod netif;
 mod protocol;
 mod server;
 
@@ -18,6 +20,8 @@ pub use client::{Client, ClientEvent, ClientHandle};
 pub use discovery::{discover, discover_on, DiscoveredHost, DiscoveryHandle};
 pub use error::NetError;
 pub use game::{JoinError, PlayerId, HOST_ID, MAX_PLAYERS};
+pub use heartbeat::HeartbeatConfig;
+pub use netif::{local_ipv4_addrs, LocalAddr};
 pub use protocol::{
     ClientMsg, ErrorCode, GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry, ServerMsg,
     DEFAULT_PORT, DISCOVERY_PORT, MAX_LINE_BYTES, PROTOCOL_VERSION,

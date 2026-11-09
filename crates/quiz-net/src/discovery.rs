@@ -1,15 +1,16 @@
 use crate::error::NetError;
+use crate::netif::{announce_targets, system_ifaces};
 use crate::protocol::DISCOVERY_PORT;
 use crate::Waker;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::task::JoinHandle;
 
 const GAME_ID: &str = "quiz-rust";
+const RECV_ERROR_PAUSE: Duration = Duration::from_millis(200);
 pub(crate) const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,6 +24,9 @@ struct Announcement {
 pub struct DiscoveredHost {
     pub name: String,
     pub addr: SocketAddr,
+    /// When the latest announcement from this host arrived. Hosts are reported again
+    /// on every announcement, so a UI can expire entries whose `last_seen` gets old.
+    pub last_seen: Instant,
 }
 
 pub struct DiscoveryHandle {
@@ -34,6 +38,21 @@ impl Drop for DiscoveryHandle {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+/// Errors that can never succeed on retry. Windows reports ICMP "port unreachable"
+/// from earlier sends as `ConnectionReset` on UDP receives, which is harmless.
+fn is_fatal(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    !matches!(
+        e.kind(),
+        ConnectionReset
+            | ConnectionRefused
+            | ConnectionAborted
+            | Interrupted
+            | WouldBlock
+            | TimedOut
+    )
 }
 
 fn parse_announcement(bytes: &[u8]) -> Option<Announcement> {
@@ -49,22 +68,30 @@ pub async fn discover_on(port: u16, waker: Option<Waker>) -> Result<DiscoveryHan
     let socket = bind_shared(port)?;
     let (tx, rx) = unbounded_channel();
     let task = tokio::spawn(async move {
-        let mut seen: HashMap<SocketAddr, String> = HashMap::new();
         let mut buf = [0u8; 1024];
         loop {
-            let Ok((n, from)) = socket.recv_from(&mut buf).await else {
-                continue;
+            let (n, from) = match socket.recv_from(&mut buf).await {
+                Ok(x) => x,
+                Err(e) if is_fatal(&e) => {
+                    tracing::warn!("discovery stopped: {e}");
+                    break;
+                }
+                Err(e) => {
+                    // Without the pause a persistent error would spin a core at 100 %.
+                    tracing::debug!("discovery recv error: {e}");
+                    tokio::time::sleep(RECV_ERROR_PAUSE).await;
+                    continue;
+                }
             };
             let Some(a) = parse_announcement(&buf[..n]) else {
                 continue;
             };
-            let addr = SocketAddr::new(from.ip(), a.port);
-            // Hosts re-announce every 2 s: only report new hosts or renamed ones.
-            if seen.get(&addr) == Some(&a.name) {
-                continue;
-            }
-            seen.insert(addr, a.name.clone());
-            if tx.send(DiscoveredHost { name: a.name, addr }).is_err() {
+            let host = DiscoveredHost {
+                name: a.name,
+                addr: SocketAddr::new(from.ip(), a.port),
+                last_seen: Instant::now(),
+            };
+            if tx.send(host).is_err() {
                 break;
             }
             if let Some(w) = &waker {
@@ -93,13 +120,20 @@ fn bind_shared(port: u16) -> Result<UdpSocket, NetError> {
     Ok(UdpSocket::from_std(socket.into())?)
 }
 
-pub(crate) async fn announce_loop(name: String, tcp_port: u16, target: SocketAddr) {
+pub(crate) enum AnnounceTarget {
+    /// Directed broadcast on every interface plus 255.255.255.255, recomputed each round
+    /// because interfaces come and go (VPN, Wi-Fi roaming).
+    Lan(u16),
+    Fixed(SocketAddr),
+}
+
+pub(crate) async fn announce_loop(name: String, tcp_port: u16, target: AnnounceTarget) {
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0").await else {
-        tracing::warn!("annonce UDP : bind impossible");
+        tracing::warn!("UDP announce: bind failed");
         return;
     };
     if socket.set_broadcast(true).is_err() {
-        tracing::warn!("annonce UDP : broadcast indisponible");
+        tracing::warn!("UDP announce: broadcast unavailable");
     }
     let Ok(payload) = serde_json::to_vec(&Announcement {
         game: GAME_ID.into(),
@@ -111,8 +145,14 @@ pub(crate) async fn announce_loop(name: String, tcp_port: u16, target: SocketAdd
     let mut tick = tokio::time::interval(ANNOUNCE_INTERVAL);
     loop {
         tick.tick().await;
-        if let Err(e) = socket.send_to(&payload, target).await {
-            tracing::debug!("annonce UDP échouée : {e}");
+        let targets = match &target {
+            AnnounceTarget::Lan(port) => announce_targets(&system_ifaces(), *port),
+            AnnounceTarget::Fixed(a) => vec![*a],
+        };
+        for t in targets {
+            if let Err(e) = socket.send_to(&payload, t).await {
+                tracing::debug!("UDP announce to {t} failed: {e}");
+            }
         }
     }
 }
@@ -120,6 +160,15 @@ pub(crate) async fn announce_loop(name: String, tcp_port: u16, target: SocketAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_errors_are_not_fatal() {
+        use std::io::{Error, ErrorKind};
+        assert!(!is_fatal(&Error::from(ErrorKind::ConnectionReset)));
+        assert!(!is_fatal(&Error::from(ErrorKind::Interrupted)));
+        assert!(is_fatal(&Error::from(ErrorKind::InvalidInput)));
+        assert!(is_fatal(&Error::from(ErrorKind::PermissionDenied)));
+    }
 
     #[test]
     fn parses_only_valid_announcements() {

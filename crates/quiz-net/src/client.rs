@@ -1,6 +1,6 @@
 use crate::error::NetError;
-use crate::io::{read_line_limited, write_line, writer_loop};
-use crate::protocol::{ClientMsg, ErrorCode, ServerMsg, PROTOCOL_VERSION};
+use crate::io::{enable_keepalive, read_line_limited, write_line, writer_loop, Beat};
+use crate::protocol::{ClientMsg, ErrorCode, ServerBeat, ServerMsg, PONG_LINE, PROTOCOL_VERSION};
 use crate::Waker;
 use std::time::Duration;
 use tokio::io::BufReader;
@@ -49,9 +49,19 @@ impl Client {
         name: &str,
         waker: Option<Waker>,
     ) -> Result<ClientHandle, NetError> {
+        Self::connect_with(addr, name, waker, crate::HeartbeatConfig::default()).await
+    }
+
+    pub async fn connect_with(
+        addr: impl ToSocketAddrs,
+        name: &str,
+        waker: Option<Waker>,
+        heartbeat: crate::HeartbeatConfig,
+    ) -> Result<ClientHandle, NetError> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
             .map_err(|_| NetError::Timeout)??;
+        enable_keepalive(&stream);
         let (r, mut w) = stream.into_split();
         let mut reader = BufReader::new(r);
         write_line(
@@ -62,10 +72,18 @@ impl Client {
             },
         )
         .await?;
-        let first = tokio::time::timeout(CONNECT_TIMEOUT, read_line_limited(&mut reader))
-            .await
-            .map_err(|_| NetError::Timeout)??
-            .ok_or_else(|| NetError::Protocol("connexion fermée par l'hôte".into()))?;
+        let first = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            loop {
+                match read_line_limited(&mut reader).await? {
+                    // A ping can race the Welcome.
+                    Some(l) if serde_json::from_str::<ServerBeat>(&l).is_ok() => continue,
+                    other => return std::io::Result::Ok(other),
+                }
+            }
+        })
+        .await
+        .map_err(|_| NetError::Timeout)??
+        .ok_or_else(|| NetError::Protocol("connexion fermée par l'hôte".into()))?;
         let player_id = match serde_json::from_str::<ServerMsg>(&first) {
             Ok(ServerMsg::Welcome {
                 protocol_version,
@@ -82,7 +100,8 @@ impl Client {
         };
 
         let (out_tx, out_rx) = unbounded_channel::<ClientMsg>();
-        tokio::spawn(writer_loop(w, out_rx));
+        let (pong_tx, pong_rx) = unbounded_channel::<()>();
+        tokio::spawn(writer_loop(w, out_rx, Beat::OnSignal(pong_rx, PONG_LINE)));
         let (ev_tx, ev_rx) = unbounded_channel();
         tokio::spawn(async move {
             let emit = |ev: ClientEvent| {
@@ -92,14 +111,20 @@ impl Client {
                 }
                 ok
             };
-            while let Ok(Some(line)) = read_line_limited(&mut reader).await {
+            // Anything received (pings included) proves the host is alive.
+            while let Ok(Ok(Some(line))) =
+                tokio::time::timeout(heartbeat.idle_timeout, read_line_limited(&mut reader)).await
+            {
                 match serde_json::from_str::<ServerMsg>(&line) {
                     Ok(m) => {
                         if !emit(ClientEvent::Message(m)) {
                             return;
                         }
                     }
-                    Err(e) => tracing::debug!("message hôte invalide ignoré : {e}"),
+                    Err(_) if serde_json::from_str::<ServerBeat>(&line).is_ok() => {
+                        let _ = pong_tx.send(());
+                    }
+                    Err(e) => tracing::debug!("invalid host message ignored: {e}"),
                 }
             }
             emit(ClientEvent::Disconnected);
