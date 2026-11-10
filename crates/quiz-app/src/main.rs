@@ -4,6 +4,7 @@
 mod app;
 mod backend;
 mod chrome;
+mod history;
 mod i18n;
 mod links;
 mod multi;
@@ -11,6 +12,7 @@ mod screens;
 mod settings;
 mod theme;
 mod themes;
+mod web;
 mod widgets;
 
 use eframe::egui;

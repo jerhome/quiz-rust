@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use quiz_core::Lang;
-use quiz_net::ScoreEntry;
+use quiz_net::{Device, PlayerInfo, ScoreEntry};
 
 use crate::app::QuizApp;
 use crate::i18n::{t, tf, Key};
@@ -100,7 +100,7 @@ pub fn show_reveal(ui: &mut egui::Ui, app: &mut QuizApp) {
         widgets::heading(ui, t(lang, Key::RevealInProgress), None);
         explanation_card(ui, &r.explanation, lang);
         ui.add_space(theme::GAP);
-        score_table(ui, &r.scores, s.my_id, lang);
+        score_table(ui, &r.scores, &s.players, s.my_id, lang);
         ui.add_space(theme::GAP);
         next_controls(ui, s, lang);
         return;
@@ -118,7 +118,7 @@ pub fn show_reveal(ui: &mut egui::Ui, app: &mut QuizApp) {
     widgets::answer_grid(ui, &items, false);
     explanation_card(ui, &r.explanation, lang);
     ui.add_space(theme::GAP);
-    score_table(ui, &r.scores, s.my_id, lang);
+    score_table(ui, &r.scores, &s.players, s.my_id, lang);
     ui.add_space(theme::GAP);
     next_controls(ui, s, lang);
 }
@@ -141,12 +141,22 @@ fn next_controls(ui: &mut egui::Ui, s: &mut Session, lang: Lang) {
     }
 }
 
-fn score_table(ui: &mut egui::Ui, scores: &[ScoreEntry], my_id: u32, lang: Lang) {
+fn score_table(
+    ui: &mut egui::Ui,
+    scores: &[ScoreEntry],
+    players: &[PlayerInfo],
+    my_id: u32,
+    lang: Lang,
+) {
     widgets::card(ui, |ui| {
         ui.label(theme::semi(t(lang, Key::Scores), theme::SIZE_SUBTITLE));
         for e in scores {
+            let info = players.iter().find(|p| p.id == e.player_id);
             ui.horizontal(|ui| {
                 ui.set_min_height(34.0);
+                if info.is_some_and(|p| !p.connected) {
+                    ui.set_opacity(0.45);
+                }
                 let me = e.player_id == my_id;
                 let color = if me {
                     theme::ACCENT_HOVER
@@ -155,6 +165,9 @@ fn score_table(ui: &mut egui::Ui, scores: &[ScoreEntry], my_id: u32, lang: Lang)
                 };
                 widgets::avatar(ui, &e.name, color);
                 ui.label(egui::RichText::new(&e.name).size(theme::SIZE_BODY));
+                if info.is_some_and(|p| p.device == Device::Web) {
+                    widgets::phone_icon(ui, theme::TEXT_DIM);
+                }
                 if me {
                     widgets::badge(ui, t(lang, Key::You), theme::ACCENT_HOVER);
                 }
@@ -197,10 +210,20 @@ pub fn show_end(ui: &mut egui::Ui, app: &mut QuizApp) {
     );
     widgets::card(ui, |ui| {
         for e in &s.ranking {
+            let info = s.players.iter().find(|p| p.id == e.player_id);
             ui.horizontal(|ui| {
                 ui.set_min_height(36.0);
+                if info.is_some_and(|p| !p.connected) {
+                    ui.set_opacity(0.45);
+                }
                 widgets::rank_pill(ui, e.rank);
                 ui.label(egui::RichText::new(&e.name).size(theme::SIZE_BODY + 1.0));
+                if info.is_some_and(|p| p.device == Device::Web) {
+                    widgets::phone_icon(ui, theme::TEXT_DIM);
+                }
+                if info.is_some_and(|p| !p.connected) {
+                    ui.label(theme::dim(t(lang, Key::DisconnectedTag)));
+                }
                 if e.player_id == s.my_id {
                     widgets::badge(ui, t(lang, Key::You), theme::ACCENT_HOVER);
                 }

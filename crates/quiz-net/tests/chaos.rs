@@ -213,6 +213,7 @@ async fn chaos_full_room_two_games() {
         port: 0,
         announce: false,
         time_limit: Some(Duration::from_millis(1500)),
+        web_port: None,
         ..HostConfig::default()
     })
     .await
@@ -393,6 +394,7 @@ async fn abrupt_reset_unblocks_unlimited_question() {
         port: 0,
         announce: false,
         time_limit: None,
+        web_port: None,
         ..HostConfig::default()
     })
     .await

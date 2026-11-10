@@ -6,12 +6,12 @@ use eframe::egui::{
 use crate::i18n::{tf, Key};
 use crate::theme as t;
 
-pub fn page(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub fn page(ui: &mut Ui, max_width: f32, add: impl FnOnce(&mut Ui)) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let avail = ui.available_rect_before_wrap();
-            let w = (avail.width() - 48.0).clamp(240.0, t::MAX_WIDTH);
+            let w = (avail.width() - 48.0).clamp(240.0, max_width);
             let left = avail.center().x - w / 2.0;
             let col = Rect::from_min_max(pos2(left, avail.top()), pos2(left + w, avail.bottom()));
             ui.scope_builder(UiBuilder::new().max_rect(col), |ui| {
@@ -729,6 +729,42 @@ pub fn error_text(ui: &mut Ui, message: &str) {
             .color(t::DANGER)
             .size(t::SIZE_BODY - 1.0),
     );
+}
+
+pub fn qr_code(ui: &mut Ui, side: usize, dark: &[bool], size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, Color32::WHITE);
+    let quiet = 2.0;
+    let cell = size / (side as f32 + 2.0 * quiet);
+    for (i, _) in dark.iter().enumerate().filter(|(_, d)| **d) {
+        let (x, y) = ((i % side) as f32, (i / side) as f32);
+        let min = rect.min + vec2((x + quiet) * cell, (y + quiet) * cell);
+        p.rect_filled(
+            egui::Rect::from_min_size(min, vec2(cell + 0.5, cell + 0.5)),
+            0.0,
+            Color32::BLACK,
+        );
+    }
+}
+
+pub fn phone_icon(ui: &mut Ui, color: Color32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(14.0, 20.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_stroke(
+        rect.shrink(1.0),
+        3.0,
+        egui::Stroke::new(1.6_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    p.line_segment(
+        [
+            rect.center_bottom() + vec2(-2.0, -4.0),
+            rect.center_bottom() + vec2(2.0, -4.0),
+        ],
+        egui::Stroke::new(1.6_f32, color),
+    );
+    resp
 }
 
 #[cfg(test)]

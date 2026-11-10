@@ -135,6 +135,7 @@ pub struct Session {
     pub game_phase: Option<GamePhase>,
     time_limit: Option<Duration>,
     pub port: u16,
+    pub web_port: Option<u16>,
     pub addrs: Vec<LocalAddr>,
 }
 
@@ -157,6 +158,7 @@ impl Session {
             game_phase: None,
             time_limit: None,
             port,
+            web_port: None,
             addrs: Vec::new(),
         }
     }
@@ -168,14 +170,18 @@ impl Session {
         time_limit: Option<Duration>,
     ) -> Self {
         let port = handle.port();
+        let web_port = handle.web_port();
         let mut s = Self::new(Link::Host(handle), HOST_ID, port);
         s.players = vec![PlayerInfo {
             id: HOST_ID,
             name: name.to_string(),
             is_host: true,
+            device: quiz_net::Device::App,
+            connected: true,
         }];
         s.questions = questions;
         s.time_limit = time_limit;
+        s.web_port = web_port;
         s.addrs = local_ipv4_addrs();
         s
     }
@@ -570,7 +576,8 @@ mod tests {
         assert_eq!(
             from_server_msg(ServerMsg::Welcome {
                 protocol_version: 1,
-                player_id: 2
+                player_id: 2,
+                resume_token: String::new(),
             }),
             NetUpdate::Ignore
         );

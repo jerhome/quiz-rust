@@ -1,13 +1,16 @@
 use crate::game::JoinError;
 use quiz_core::{Lang, Question};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Bump on any wire change; the host refuses clients with another version.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const DEFAULT_PORT: u16 = 7878;
 pub const DISCOVERY_PORT: u16 = 7879;
 /// Bounds per-connection memory: a longer line drops the connection.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
+/// Browser frames are tiny (join/answer); anything bigger closes the socket.
+pub const MAX_WS_FRAME_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 /// Language-independent so each client renders it in its own language;
@@ -20,6 +23,8 @@ pub enum ErrorCode {
     LobbyFull,
     ExpectedJoin,
     InvalidMessage,
+    /// Host-side failure unrelated to the peer's input (e.g. no system randomness).
+    Internal,
 }
 
 impl ErrorCode {
@@ -40,6 +45,8 @@ impl ErrorCode {
             (ExpectedJoin, Lang::En) => "join message expected",
             (InvalidMessage, Lang::Fr) => "message invalide",
             (InvalidMessage, Lang::En) => "invalid message",
+            (Internal, Lang::Fr) => "erreur interne de l'hôte",
+            (Internal, Lang::En) => "internal host error",
         }
     }
 }
@@ -68,6 +75,23 @@ pub struct PlayerInfo {
     pub id: u32,
     pub name: String,
     pub is_host: bool,
+    #[serde(default)]
+    pub device: Device,
+    /// `false` while the player is inside the resume grace period.
+    #[serde(default = "default_true")]
+    pub connected: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Set by the server from the transport the player joined with, never by the client.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Device {
+    #[default]
+    App,
+    Web,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,19 +145,30 @@ impl PublicQuestion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMsg {
-    Join { name: String, protocol_version: u32 },
-    Answer { question_id: u32, choice: usize },
+    Join {
+        name: String,
+        protocol_version: u32,
+        /// Token from a previous `Welcome`; reclaims that player's identity and score.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
+    },
+    Answer {
+        question_id: u32,
+        choice: usize,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMsg {
     Welcome {
         protocol_version: u32,
         player_id: u32,
+        /// Secret and rotated on every join; must never be logged.
+        resume_token: String,
     },
     Error {
         code: ErrorCode,
@@ -175,6 +210,27 @@ pub(crate) enum ClientBeat {
 
 pub(crate) const PING_LINE: &[u8] = b"{\"type\":\"Ping\"}\n";
 pub(crate) const PONG_LINE: &[u8] = b"{\"type\":\"Pong\"}\n";
+
+// Debug goes through the JSON form so a new variant cannot forget to mask a secret.
+fn fmt_masked<T: Serialize>(v: &T, secret: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let mut json = serde_json::to_value(v).map_err(|_| fmt::Error)?;
+    if let Some(field) = json.get_mut(secret) {
+        *field = "***".into();
+    }
+    write!(f, "{json}")
+}
+
+impl fmt::Debug for ClientMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_masked(self, "resume", f)
+    }
+}
+
+impl fmt::Debug for ServerMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_masked(self, "resume_token", f)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -249,18 +305,66 @@ mod tests {
     }
 
     #[test]
+    fn v5_fields_have_backward_compatible_defaults() {
+        let j: ClientMsg =
+            serde_json::from_str(r#"{"type":"Join","name":"A","protocol_version":5}"#).unwrap();
+        assert!(matches!(j, ClientMsg::Join { resume: None, .. }));
+        let p: PlayerInfo = serde_json::from_str(r#"{"id":1,"name":"A","is_host":false}"#).unwrap();
+        assert_eq!((p.device, p.connected), (Device::App, true));
+    }
+
+    #[test]
     fn messages_roundtrip() {
         let m = ClientMsg::Join {
             name: "A".into(),
             protocol_version: 1,
+            resume: Some("tok".into()),
         };
         let s = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<ClientMsg>(&s).unwrap(), m);
         let m = ServerMsg::Welcome {
             protocol_version: 1,
             player_id: 4,
+            resume_token: "tok".into(),
         };
         let s = serde_json::to_string(&m).unwrap();
         assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), m);
+    }
+
+    #[test]
+    fn debug_hides_resume_tokens() {
+        let j = ClientMsg::Join {
+            name: "A".into(),
+            protocol_version: PROTOCOL_VERSION,
+            resume: Some("SECRETTOKEN".into()),
+        };
+        let w = ServerMsg::Welcome {
+            protocol_version: PROTOCOL_VERSION,
+            player_id: 1,
+            resume_token: "SECRETTOKEN".into(),
+        };
+        for d in [
+            format!("{j:?}"),
+            format!("{w:?}"),
+            format!("{:?}", Some(&w)),
+        ] {
+            assert!(!d.contains("SECRETTOKEN"), "{d}");
+            assert!(d.contains("***"), "{d}");
+        }
+        assert!(format!("{j:?}").contains("Join") && format!("{w:?}").contains("Welcome"));
+        assert!(serde_json::to_string(&w).unwrap().contains("SECRETTOKEN"));
+        let none = ClientMsg::Join {
+            name: "A".into(),
+            protocol_version: 1,
+            resume: None,
+        };
+        assert!(!format!("{none:?}").contains("***"));
+    }
+
+    #[test]
+    fn internal_error_code_has_messages() {
+        for l in [Lang::Fr, Lang::En] {
+            assert!(!ErrorCode::Internal.message(l).is_empty());
+        }
     }
 }

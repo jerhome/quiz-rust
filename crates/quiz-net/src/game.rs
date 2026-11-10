@@ -1,7 +1,7 @@
 //! Pure game logic: no I/O. Time is injected as `now_ms` (milliseconds on any
 //! monotonic clock chosen by the caller) so every rule is unit-testable.
 
-use crate::protocol::{GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry};
+use crate::protocol::{Device, GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry};
 use quiz_core::Question;
 use std::collections::HashMap;
 
@@ -18,6 +18,8 @@ const ORDER_BONUS: [u32; 5] = [500, 400, 300, 200, 100];
 pub type PlayerId = u32;
 pub const HOST_ID: PlayerId = 0;
 pub const MAX_PLAYERS: usize = 8;
+/// Connected plus disconnected (resumable) seats; keeps the `Lobby` message small.
+const MAX_SEATS: usize = 2 * MAX_PLAYERS;
 pub const MAX_NAME_CHARS: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -65,6 +67,11 @@ struct Player {
     name: String,
     connected: bool,
     score: u32,
+    device: Device,
+    disconnected_at_ms: Option<u64>,
+    // The previous token stays valid: the `Welcome` carrying the new one may be lost
+    // together with the connection.
+    tokens: Vec<String>,
 }
 
 pub fn speed_bonus(remaining_ms: u64, limit_ms: u64) -> u32 {
@@ -135,10 +142,16 @@ impl Game {
         }
     }
 
-    /// Joining is allowed in any phase. Names must be unique among *connected* players, so
-    /// a disconnected player can come back under the same name (with 0 points). A late
-    /// joiner is expected to answer the current question as soon as they arrive.
     pub fn add_player(&mut self, name: &str) -> Result<PlayerId, JoinError> {
+        self.add_player_on(name, Device::App)
+    }
+
+    /// Joining is allowed in any phase. Names must be unique among *connected* players, so
+    /// a player who lost their token can come back under the same name (with 0 points).
+    /// In the lobby the stale disconnected entry of that name is dropped; during a game it
+    /// is kept (its score still counts) until its grace period ends. A late joiner is
+    /// expected to answer the current question as soon as they arrive.
+    pub fn add_player_on(&mut self, name: &str, device: Device) -> Result<PlayerId, JoinError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(JoinError::EmptyName);
@@ -156,6 +169,24 @@ impl Game {
         {
             return Err(JoinError::NameTaken);
         }
+        if self.phase == Phase::Lobby {
+            self.players
+                .retain(|p| p.connected || p.name.to_lowercase() != name.to_lowercase());
+        }
+        if self.players.len() >= MAX_SEATS {
+            let oldest_ghost = self
+                .players
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| p.disconnected_at_ms.map(|t| (t, i)))
+                .min();
+            match oldest_ghost {
+                Some((_, i)) => {
+                    self.players.remove(i);
+                }
+                None => return Err(JoinError::LobbyFull),
+            }
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.players.push(Player {
@@ -163,35 +194,84 @@ impl Game {
             name: name.to_string(),
             connected: true,
             score: 0,
+            device,
+            disconnected_at_ms: None,
+            tokens: Vec::new(),
         });
         Ok(id)
     }
 
-    /// In the lobby the player is removed; during a game they stay (score kept) but are no
-    /// longer waited for.
-    pub fn remove_player(&mut self, id: PlayerId) -> bool {
-        if self.phase == Phase::Lobby {
-            let before = self.players.len();
-            self.players.retain(|p| p.id != id);
-            return self.players.len() != before;
-        }
+    /// The player stays (score kept, visible as disconnected) but is no longer waited for,
+    /// until `expire_disconnected` removes them.
+    pub fn disconnect(&mut self, id: PlayerId, now_ms: u64) -> bool {
         match self.players.iter_mut().find(|p| p.id == id && p.connected) {
             Some(p) => {
                 p.connected = false;
+                p.disconnected_at_ms = Some(now_ms);
                 true
             }
             None => false,
         }
     }
 
+    pub fn set_token(&mut self, id: PlayerId, token: String) {
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == id) {
+            p.tokens.push(token);
+            if p.tokens.len() > 2 {
+                p.tokens.remove(0);
+            }
+        }
+    }
+
+    /// Reclaims the player owning `token`; `Ok(None)` for an unknown or expired token.
+    /// Works on a still-connected player too (the caller replaces the old connection).
+    pub fn resume(&mut self, token: &str, device: Device) -> Result<Option<PlayerId>, JoinError> {
+        let connected = self.players.iter().filter(|p| p.connected).count();
+        let Some(p) = self
+            .players
+            .iter_mut()
+            .find(|p| p.id != HOST_ID && p.tokens.iter().any(|t| t == token))
+        else {
+            return Ok(None);
+        };
+        if !p.connected {
+            if connected >= MAX_PLAYERS {
+                return Err(JoinError::LobbyFull);
+            }
+            p.connected = true;
+            p.disconnected_at_ms = None;
+        }
+        p.device = device;
+        Ok(Some(p.id))
+    }
+
+    /// Removes players disconnected for longer than `grace_ms`.
+    pub fn expire_disconnected(&mut self, now_ms: u64, grace_ms: u64) -> bool {
+        let before = self.players.len();
+        self.players.retain(|p| {
+            p.disconnected_at_ms
+                .is_none_or(|t| now_ms < t.saturating_add(grace_ms))
+        });
+        self.players.len() != before
+    }
+
+    pub fn next_expiry_ms(&self, grace_ms: u64) -> Option<u64> {
+        self.players
+            .iter()
+            .filter_map(|p| p.disconnected_at_ms)
+            .map(|t| t.saturating_add(grace_ms))
+            .min()
+    }
+
     pub fn lobby(&self) -> Vec<PlayerInfo> {
         self.players
             .iter()
-            .filter(|p| p.connected)
             .map(|p| PlayerInfo {
                 id: p.id,
                 name: p.name.clone(),
                 is_host: p.id == HOST_ID,
+                device: p.device,
+                connected: p.connected,
             })
             .collect()
     }
@@ -499,7 +579,7 @@ mod tests {
         g.advance(0).unwrap();
         assert!(g.is_ended());
         g.add_player("Late").unwrap();
-        g.remove_player(1);
+        g.disconnect(1, 0);
         g.add_player("Alice").unwrap();
     }
 
@@ -534,16 +614,86 @@ mod tests {
     }
 
     #[test]
-    fn remove_in_lobby_and_in_game() {
+    fn disconnect_keeps_player_visible_with_score() {
         let mut g = game3();
-        assert!(g.remove_player(2));
-        assert!(!g.remove_player(2));
-        assert_eq!(g.lobby().len(), 2);
+        assert!(g.disconnect(2, 5));
+        assert!(!g.disconnect(2, 6));
+        let l = g.lobby();
+        assert_eq!(l.len(), 3);
+        assert_eq!(l.iter().filter(|p| p.connected).count(), 2);
         g.start(qs(2), 0).unwrap();
-        assert!(g.remove_player(1));
-        assert!(!g.remove_player(1));
-        assert_eq!(g.lobby().len(), 1);
-        assert_eq!(g.scores().len(), 2, "garde son score");
+        assert!(g.disconnect(1, 7));
+        assert_eq!(g.scores().len(), 3, "garde son score");
+        assert_eq!(g.answer_progress(), (0, 1));
+    }
+
+    #[test]
+    fn lobby_reports_device() {
+        let mut g = Game::new(None);
+        g.add_player("Hôte").unwrap();
+        g.add_player_on("Web", Device::Web).unwrap();
+        let l = g.lobby();
+        assert_eq!((l[0].device, l[1].device), (Device::App, Device::Web));
+    }
+
+    #[test]
+    fn resume_restores_identity_and_score() {
+        let mut g = game3();
+        g.set_token(1, "t1".into());
+        g.start(qs(2), 0).unwrap();
+        g.answer(1, 0, 1, 1);
+        g.disconnect(1, 10);
+        assert_eq!(g.resume("nope", Device::App), Ok(None));
+        assert_eq!(g.resume("t1", Device::Web), Ok(Some(1)));
+        assert!(g.lobby()[1].connected);
+        assert_eq!(g.lobby()[1].device, Device::Web);
+        assert!(!g.answer(1, 0, 2, 20), "first answer is kept");
+        assert_eq!(g.next_expiry_ms(100), None);
+    }
+
+    #[test]
+    fn resume_accepts_previous_token_but_not_older() {
+        let mut g = game3();
+        for t in ["a", "b", "c"] {
+            g.set_token(1, t.into());
+        }
+        assert_eq!(g.resume("a", Device::App), Ok(None));
+        assert_eq!(g.resume("b", Device::App), Ok(Some(1)));
+        assert_eq!(g.resume("c", Device::App), Ok(Some(1)));
+    }
+
+    #[test]
+    fn resume_refused_when_full_and_host_token_unused() {
+        let mut g = Game::new(None);
+        g.add_player("h").unwrap();
+        g.add_player("x").unwrap();
+        g.set_token(1, "tx".into());
+        g.disconnect(1, 0);
+        for i in 0..MAX_PLAYERS - 1 {
+            g.add_player(&format!("p{i}")).unwrap();
+        }
+        assert_eq!(g.resume("tx", Device::App), Err(JoinError::LobbyFull));
+    }
+
+    #[test]
+    fn disconnected_expire_after_grace() {
+        let mut g = game3();
+        g.disconnect(1, 100);
+        g.disconnect(2, 300);
+        assert_eq!(g.next_expiry_ms(1000), Some(1100));
+        assert!(!g.expire_disconnected(1099, 1000));
+        assert!(g.expire_disconnected(1100, 1000));
+        assert_eq!(g.lobby().len(), 2);
+        assert_eq!(g.next_expiry_ms(1000), Some(1300));
+    }
+
+    #[test]
+    fn lobby_name_of_ghost_is_reusable_and_ghost_dropped() {
+        let mut g = game3();
+        g.disconnect(1, 0);
+        let id = g.add_player("alice").unwrap();
+        assert_ne!(id, 1);
+        assert_eq!(g.lobby().len(), 3);
     }
 
     #[test]
@@ -577,7 +727,7 @@ mod tests {
         g.answer(0, 0, 1, 1);
         g.answer(1, 0, 0, 1);
         assert!(!g.all_answered());
-        g.remove_player(2);
+        g.disconnect(2, 0);
         assert!(g.all_answered());
     }
 
@@ -673,7 +823,7 @@ mod tests {
         let mut g = game3();
         g.start(qs(2), 0).unwrap();
         g.answer(1, 0, 1, 1);
-        g.remove_player(1);
+        g.disconnect(1, 0);
         let r = g.reveal().unwrap();
         assert!(r.scores[1].score >= 500);
     }
@@ -712,7 +862,7 @@ mod tests {
         g.reveal().unwrap();
         assert!(!g.back_to_lobby());
         g.advance(2).unwrap();
-        g.remove_player(2);
+        g.disconnect(2, 0);
         assert!(g.back_to_lobby());
         assert!(g.in_lobby());
         assert_eq!(g.scores().len(), 2, "déconnecté purgé");
@@ -763,5 +913,54 @@ mod tests {
         let mut g = Game::new(Some(Duration::from_millis(300)));
         g.add_player("a").unwrap();
         assert_eq!(g.start(qs(1), 0).unwrap().time_limit_secs, Some(1));
+    }
+
+    #[test]
+    fn ghosts_are_capped_and_lobby_fits_one_line() {
+        let mut g = Game::new(None);
+        g.add_player("Hôte").unwrap();
+        for i in 0..60u64 {
+            let name = format!("{}{i}", "é".repeat(MAX_NAME_CHARS - 2));
+            let id = g.add_player(&name).unwrap();
+            assert!(g.disconnect(id, i));
+            assert!(g.lobby().len() <= 2 * MAX_PLAYERS);
+        }
+        let lobby = g.lobby();
+        assert_eq!(lobby.len(), 2 * MAX_PLAYERS);
+        // The oldest ghosts were evicted first.
+        assert!(lobby.iter().any(|p| p.name.ends_with("59")));
+        let first = format!("{}0", "é".repeat(MAX_NAME_CHARS - 2));
+        assert!(!lobby.iter().any(|p| p.name == first));
+        let json = serde_json::to_string(&crate::protocol::ServerMsg::Lobby {
+            players: lobby,
+            phase: g.phase(),
+        })
+        .unwrap();
+        assert!(
+            json.len() < crate::protocol::MAX_LINE_BYTES / 4,
+            "{}",
+            json.len()
+        );
+    }
+
+    #[test]
+    fn full_of_connected_players_still_refuses() {
+        let mut g = Game::new(None);
+        g.add_player("Hôte").unwrap();
+        for i in 1..MAX_PLAYERS {
+            g.add_player(&format!("p{i}")).unwrap();
+        }
+        assert_eq!(g.add_player("late"), Err(JoinError::LobbyFull));
+    }
+
+    #[test]
+    fn resuming_a_ghost_does_not_grow_the_total() {
+        let mut g = Game::new(None);
+        g.add_player("Hôte").unwrap();
+        let a = g.add_player("A").unwrap();
+        g.set_token(a, "tok".into());
+        g.disconnect(a, 1);
+        assert_eq!(g.resume("tok", Device::App), Ok(Some(a)));
+        assert_eq!(g.lobby().len(), 2);
     }
 }

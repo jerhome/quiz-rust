@@ -44,6 +44,7 @@ async fn restarted_host_with_same_ip_port_and_name_is_signalled_again() {
         announce: true,
         discovery_port: dport,
         announce_ip: "127.0.0.1".parse().unwrap(),
+        web_port: None,
         ..HostConfig::default()
     };
     let first = Host::start(cfg.clone()).await.unwrap();

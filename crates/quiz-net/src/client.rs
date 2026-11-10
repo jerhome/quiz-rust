@@ -18,12 +18,18 @@ pub enum ClientEvent {
 pub struct ClientHandle {
     pub events: UnboundedReceiver<ClientEvent>,
     player_id: u32,
+    resume_token: String,
     out: Option<UnboundedSender<ClientMsg>>,
 }
 
 impl ClientHandle {
     pub fn player_id(&self) -> u32 {
         self.player_id
+    }
+
+    /// Keep it to rejoin as the same player after a dropped connection.
+    pub fn resume_token(&self) -> &str {
+        &self.resume_token
     }
 
     pub fn answer(&self, question_id: u32, choice: usize) {
@@ -58,6 +64,16 @@ impl Client {
         waker: Option<Waker>,
         heartbeat: crate::HeartbeatConfig,
     ) -> Result<ClientHandle, NetError> {
+        Self::connect_resume(addr, name, None, waker, heartbeat).await
+    }
+
+    pub async fn connect_resume(
+        addr: impl ToSocketAddrs,
+        name: &str,
+        resume: Option<String>,
+        waker: Option<Waker>,
+        heartbeat: crate::HeartbeatConfig,
+    ) -> Result<ClientHandle, NetError> {
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
             .map_err(|_| NetError::Timeout)??;
@@ -69,6 +85,7 @@ impl Client {
             &ClientMsg::Join {
                 name: name.to_string(),
                 protocol_version: PROTOCOL_VERSION,
+                resume,
             },
         )
         .await?;
@@ -84,11 +101,12 @@ impl Client {
         .await
         .map_err(|_| NetError::Timeout)??
         .ok_or_else(|| NetError::Protocol("connexion fermée par l'hôte".into()))?;
-        let player_id = match serde_json::from_str::<ServerMsg>(&first) {
+        let (player_id, resume_token) = match serde_json::from_str::<ServerMsg>(&first) {
             Ok(ServerMsg::Welcome {
                 protocol_version,
                 player_id,
-            }) if protocol_version == PROTOCOL_VERSION => player_id,
+                resume_token,
+            }) if protocol_version == PROTOCOL_VERSION => (player_id, resume_token),
             Ok(ServerMsg::Welcome {
                 protocol_version, ..
             }) => {
@@ -132,6 +150,7 @@ impl Client {
         Ok(ClientHandle {
             events: ev_rx,
             player_id,
+            resume_token,
             out: Some(out_tx),
         })
     }

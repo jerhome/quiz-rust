@@ -34,6 +34,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut QuizApp) {
         model_section(ui, app);
         api_key_field(ui, &mut app.form, lang);
         key_memory(ui, app);
+        history_section(ui, app);
         if cfg!(target_os = "linux") {
             display_section(ui, app);
         }
@@ -102,6 +103,43 @@ fn key_memory(ui: &mut egui::Ui, app: &mut QuizApp) {
     if widgets::button(ui, t(lang, Key::ForgetSaved), ButtonKind::Secondary, None).clicked() {
         app.forget_key();
     }
+}
+
+fn history_section(ui: &mut egui::Ui, app: &mut QuizApp) {
+    let lang = app.lang();
+    ui.add_space(theme::GAP);
+    ui.separator();
+    ui.label(theme::dim(t(lang, Key::HistoryHelp)));
+    let n = app.history.len().to_string();
+    if !app.confirm_clear_history {
+        let label = tf(lang, Key::ClearHistory, &[&n]);
+        let b = widgets::button_enabled(
+            ui,
+            &label,
+            ButtonKind::Secondary,
+            None,
+            !app.history.is_empty(),
+        );
+        app.confirm_clear_history = b.clicked();
+        return;
+    }
+    ui.label(tf(lang, Key::ClearHistoryAsk, &[&n]));
+    ui.horizontal(|ui| {
+        let half = ui.available_width() / 2.0 - 6.0;
+        if widgets::button(
+            ui,
+            t(lang, Key::ClearHistoryYes),
+            ButtonKind::Primary,
+            Some(half),
+        )
+        .clicked()
+        {
+            app.clear_history();
+        }
+        if widgets::button(ui, t(lang, Key::Cancel), ButtonKind::Secondary, Some(half)).clicked() {
+            app.confirm_clear_history = false;
+        }
+    });
 }
 
 fn display_section(ui: &mut egui::Ui, app: &mut QuizApp) {

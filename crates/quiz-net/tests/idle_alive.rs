@@ -16,6 +16,7 @@ async fn idle_lobby_outlives_many_idle_timeouts() {
         announce: false,
         time_limit: None,
         heartbeat: HB,
+        web_port: None,
         ..HostConfig::default()
     })
     .await

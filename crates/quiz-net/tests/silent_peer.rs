@@ -31,6 +31,7 @@ async fn host_drops_a_silent_player_and_reveals_in_time() {
         announce: false,
         time_limit: None,
         heartbeat: HB,
+        web_port: None,
         ..HostConfig::default()
     })
     .await
@@ -92,7 +93,7 @@ async fn client_detects_a_host_that_went_silent() {
         let mut line = String::new();
         r.read_line(&mut line).await.unwrap();
         let welcome = format!(
-            "{{\"type\":\"Welcome\",\"protocol_version\":{PROTOCOL_VERSION},\"player_id\":1}}\n"
+            "{{\"type\":\"Welcome\",\"protocol_version\":{PROTOCOL_VERSION},\"player_id\":1,\"resume_token\":\"x\"}}\n"
         );
         w.write_all(welcome.as_bytes()).await.unwrap();
         tokio::time::sleep(Duration::from_secs(10)).await;

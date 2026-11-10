@@ -2,7 +2,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
 use quiz_core::{Question, Quiz, QuizConfig, QuizState};
-use quiz_llm::{ApiKey, ClaudeClient, LlmError};
+use quiz_llm::{ApiKey, ClaudeClient, LlmError, Variety};
 use quiz_net::{
     Client, ClientHandle, DiscoveryHandle, Host, HostConfig, HostHandle, NetError, Waker,
 };
@@ -102,6 +102,8 @@ fn waker(ctx: &egui::Context) -> Waker {
 type Tx<T> = Sender<Result<T, NetError>>;
 type Rx<T> = Receiver<Result<T, NetError>>;
 
+const WIDE_WIDTH: f32 = 1000.0;
+
 pub struct QuizApp {
     pub route: Route,
     pub notice: Option<Msg>,
@@ -122,6 +124,9 @@ pub struct QuizApp {
     rx: Receiver<Result<Vec<Question>, LlmError>>,
     api_key: String,
     pub settings: Settings,
+    pub history: crate::history::History,
+    history_path: Option<std::path::PathBuf>,
+    pub confirm_clear_history: bool,
     pub model_other: bool,
     pub model_text: String,
     pub save_failed: bool,
@@ -158,7 +163,15 @@ impl QuizApp {
         let env_key = std::env::var("ANTHROPIC_API_KEY").ok();
         let key = settings::initial_key(env_key.as_deref(), settings.api_key.as_deref());
         let model_other = !quiz_llm::MODELS.iter().any(|(id, _)| *id == settings.model);
+        let history_path = crate::history::path();
+        let history = history_path
+            .as_deref()
+            .map(crate::history::load_from)
+            .unwrap_or_default();
         Self {
+            history,
+            history_path,
+            confirm_clear_history: false,
             model_other,
             model_text: if model_other {
                 settings.model.clone()
@@ -297,6 +310,8 @@ impl QuizApp {
             name: self.form.name.trim().to_string(),
             time_limit: self.form.time_limit_duration(),
             waker: Some(waker(ctx)),
+            web_port: Some(quiz_net::DEFAULT_WEB_PORT),
+            web_assets: crate::web::assets(),
             ..HostConfig::default()
         };
         let tx = self.host_chan.0.clone();
@@ -397,11 +412,16 @@ impl QuizApp {
         let config = self.quiz.config().clone();
         let key = ApiKey::new(self.api_key.clone());
         let model = self.settings.model.clone();
+        let keys = crate::history::selection_keys(&self.form.picker);
+        let variety = Variety {
+            avoid: self.history.avoid(&keys, crate::history::AVOID_LIMIT),
+            seed: None,
+        };
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             let result = match ClaudeClient::new(key, model) {
-                Ok(client) => client.generate_quiz(&config).await,
+                Ok(client) => client.generate_quiz_with(&config, &variety).await,
                 Err(e) => Err(e),
             };
             let _ = tx.send(result);
@@ -413,6 +433,9 @@ impl QuizApp {
         while let Ok(result) = self.rx.try_recv() {
             if self.quiz.state() != QuizState::Generating {
                 continue;
+            }
+            if let Ok(questions) = &result {
+                self.remember_questions(questions);
             }
             match result {
                 Ok(questions) if self.route == Route::Host => self.begin_host(questions, ctx),
@@ -583,6 +606,27 @@ impl QuizApp {
         settings::key_is_from_env(&self.form.api_key, self.env_key.as_deref())
     }
 
+    fn remember_questions(&mut self, questions: &[Question]) {
+        let keys = crate::history::selection_keys(&self.form.picker);
+        self.history
+            .record(&keys, questions.iter().map(|q| q.prompt.clone()));
+        self.save_history();
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.confirm_clear_history = false;
+        self.save_history();
+    }
+
+    fn save_history(&self) {
+        if let Some(path) = &self.history_path {
+            if crate::history::save_to(path, &self.history).is_err() {
+                tracing::warn!("could not save question history");
+            }
+        }
+    }
+
     pub fn forget_key(&mut self) {
         self.settings.remember_key = false;
         self.settings.api_key = None;
@@ -622,7 +666,14 @@ impl eframe::App for QuizApp {
         self.show_quit_confirmation(ctx);
         let frame = egui::Frame::NONE.fill(crate::theme::BG);
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            crate::widgets::page(ui, |ui| match screen {
+            let wide =
+                screen == Screen::Lobby && self.session.as_ref().is_some_and(Session::is_host);
+            let max_width = if wide {
+                WIDE_WIDTH
+            } else {
+                crate::theme::MAX_WIDTH
+            };
+            crate::widgets::page(ui, max_width, |ui| match screen {
                 Screen::Home => screens::home::show(ui, self),
                 Screen::Join => screens::join::show(ui, self),
                 Screen::Settings => screens::settings::show(ui, self),

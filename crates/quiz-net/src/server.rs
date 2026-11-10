@@ -1,25 +1,28 @@
+use crate::conn::{serve, Link};
 use crate::discovery::{announce_loop, AnnounceTarget};
 use crate::error::NetError;
 use crate::game::{Advance, Game, GameError, PlayerId, RevealInfo, HOST_ID};
 use crate::io::{enable_keepalive, read_line_limited, writer_loop, Beat};
 use crate::protocol::{
-    ClientBeat, ClientMsg, ErrorCode, PlayerInfo, PublicQuestion, RankEntry, ServerMsg,
-    DEFAULT_PORT, DISCOVERY_PORT, PING_LINE, PROTOCOL_VERSION,
+    Device, ErrorCode, PlayerInfo, PublicQuestion, RankEntry, ServerMsg, DEFAULT_PORT,
+    DISCOVERY_PORT, PING_LINE, PROTOCOL_VERSION,
 };
+use crate::web::{self, WebAssets};
 use crate::{HeartbeatConfig, Waker};
 use quiz_core::Question;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::BufReader;
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{oneshot, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-// A connection that does not send `Join` in time is dropped.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_WEB_PORT: u16 = 7880;
 
 #[derive(Clone)]
 pub struct HostConfig {
@@ -31,6 +34,15 @@ pub struct HostConfig {
     pub announce_ip: IpAddr,
     pub waker: Option<Waker>,
     pub heartbeat: crate::HeartbeatConfig,
+    /// `None` disables the browser transport; `Some(0)` picks a free port.
+    pub web_port: Option<u16>,
+    pub web_assets: WebAssets,
+    /// How long a disconnected player keeps their seat and score for a resume.
+    pub resume_grace: Duration,
+    /// Simultaneous TCP + web connections accepted; extra ones are dropped immediately.
+    pub max_connections: usize,
+    /// Deadline for a browser connection to send its request headers.
+    pub http_timeout: Duration,
 }
 
 impl Default for HostConfig {
@@ -44,6 +56,11 @@ impl Default for HostConfig {
             announce_ip: IpAddr::V4(Ipv4Addr::BROADCAST),
             waker: None,
             heartbeat: crate::HeartbeatConfig::default(),
+            web_port: Some(DEFAULT_WEB_PORT),
+            web_assets: WebAssets::default(),
+            resume_grace: Duration::from_secs(600),
+            max_connections: 64,
+            http_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -59,11 +76,16 @@ pub enum HostEvent {
     Error(String),
 }
 
-enum Cmd {
+pub(crate) enum Cmd {
     Join {
         name: String,
         version: u32,
+        resume: Option<String>,
+        device: Device,
+        conn_id: u64,
         out: UnboundedSender<ServerMsg>,
+        // Dropping it tells the connection task to stop (session taken over).
+        kill: oneshot::Sender<()>,
         reply: oneshot::Sender<Option<PlayerId>>,
     },
     Answer {
@@ -71,7 +93,10 @@ enum Cmd {
         question_id: u32,
         choice: usize,
     },
-    Disconnected(PlayerId),
+    Disconnected {
+        id: PlayerId,
+        conn_id: u64,
+    },
     Start(Vec<Question>, Option<Duration>),
     HostAnswer(usize),
     Next,
@@ -84,11 +109,17 @@ pub struct HostHandle {
     pub events: UnboundedReceiver<HostEvent>,
     cmd: UnboundedSender<Cmd>,
     port: u16,
+    web_port: Option<u16>,
 }
 
 impl HostHandle {
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// `None` when the web transport is disabled or its port could not be bound.
+    pub fn web_port(&self) -> Option<u16> {
+        self.web_port
     }
 
     pub fn start_game(&self, questions: Vec<Question>, time_limit: Option<Duration>) {
@@ -145,15 +176,46 @@ impl Host {
             tokio::spawn(announce_loop(config.name.clone(), port, target))
         });
 
+        let permits = Arc::new(Semaphore::new(config.max_connections));
+        let web_port = match config.web_port {
+            Some(wp) => match TcpListener::bind(("0.0.0.0", wp)).await {
+                Ok(l) => {
+                    let bound = l.local_addr().ok().map(|a| a.port());
+                    let app = web::router(web::WebState {
+                        assets: Arc::new(config.web_assets),
+                        cmd: cmd_tx.clone(),
+                        stop: stop_rx.clone(),
+                        hb: config.heartbeat,
+                    });
+                    tokio::spawn(web::serve_http(
+                        l,
+                        app,
+                        permits.clone(),
+                        stop_rx.clone(),
+                        config.http_timeout,
+                    ));
+                    bound
+                }
+                Err(e) => {
+                    tracing::warn!("web server disabled, cannot bind port {wp}: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+
         tokio::spawn(accept_loop(
             listener,
             cmd_tx.clone(),
             stop_rx,
             config.heartbeat,
+            permits,
         ));
         let actor = Actor {
             game,
             conns: HashMap::new(),
+            grace_ms: config.resume_grace.as_millis() as u64,
+            last_reveal: None,
             events: ev_tx,
             waker: config.waker,
             base: Instant::now(),
@@ -164,6 +226,7 @@ impl Host {
             events: ev_rx,
             cmd: cmd_tx,
             port,
+            web_port,
         })
     }
 }
@@ -173,15 +236,24 @@ async fn accept_loop(
     cmd: UnboundedSender<Cmd>,
     mut stop: watch::Receiver<bool>,
     hb: HeartbeatConfig,
+    permits: Arc<Semaphore>,
 ) {
     loop {
         tokio::select! {
             _ = stop.changed() => break,
             res = listener.accept() => match res {
                 Ok((stream, peer)) => {
+                    let Ok(permit) = permits.clone().try_acquire_owned() else {
+                        tracing::debug!(%peer, "connection limit reached");
+                        continue;
+                    };
                     tracing::debug!(%peer, "incoming connection");
                     enable_keepalive(&stream);
-                    tokio::spawn(serve_conn(stream, cmd.clone(), stop.clone(), hb));
+                    let (cmd, stop) = (cmd.clone(), stop.clone());
+                    tokio::spawn(async move {
+                        serve_conn(stream, cmd, stop, hb).await;
+                        drop(permit);
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("accept: {e}");
@@ -195,85 +267,45 @@ async fn accept_loop(
 async fn serve_conn(
     stream: TcpStream,
     cmd: UnboundedSender<Cmd>,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
     hb: HeartbeatConfig,
 ) {
     let (r, w) = stream.into_split();
-    let (out_tx, out_rx) = unbounded_channel::<ServerMsg>();
-    let writer = tokio::spawn(writer_loop(w, out_rx, Beat::every(hb.interval, PING_LINE)));
-    let mut reader = BufReader::new(r);
+    let (out, out_rx) = unbounded_channel::<ServerMsg>();
+    tokio::spawn(writer_loop(w, out_rx, Beat::every(hb.interval, PING_LINE)));
+    let (in_tx, inbound) = mpsc::channel(32);
+    tokio::spawn(tcp_pump(BufReader::new(r), in_tx));
+    serve(
+        Link {
+            inbound,
+            out,
+            device: Device::App,
+        },
+        cmd,
+        stop,
+        hb,
+    )
+    .await;
+}
 
-    let id = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(&mut reader, &out_tx, &cmd))
-        .await
-    {
-        Ok(Some(id)) => id,
-        _ => {
-            // Rejected: the actor already queued the error; let the writer flush it before closing.
-            drop(out_tx);
-            let _ = writer.await;
-            return;
-        }
-    };
-
+// Dropping `tx` (EOF, oversized or invalid line) is how the connection task learns the peer is gone.
+async fn tcp_pump(mut reader: BufReader<OwnedReadHalf>, tx: mpsc::Sender<String>) {
     loop {
-        let line = tokio::select! {
-            _ = stop.changed() => break,
-            // Anything received (pongs included) proves the player is alive.
-            l = tokio::time::timeout(hb.idle_timeout, read_line_limited(&mut reader)) => l,
-        };
-        let Ok(Ok(Some(line))) = line else { break };
-        match serde_json::from_str::<ClientMsg>(&line) {
-            Ok(ClientMsg::Answer {
-                question_id,
-                choice,
-            }) => {
-                let _ = cmd.send(Cmd::Answer {
-                    id,
-                    question_id,
-                    choice,
-                });
-            }
-            Err(_) if serde_json::from_str::<ClientBeat>(&line).is_ok() => {}
-            Ok(ClientMsg::Join { .. }) | Err(_) => {
-                let _ = out_tx.send(error_msg(ErrorCode::InvalidMessage));
-                break;
-            }
+        tokio::select! {
+            _ = tx.closed() => break,
+            l = read_line_limited(&mut reader) => match l {
+                Ok(Some(l)) => {
+                    if tx.send(l).await.is_err() {
+                        break;
+                    }
+                }
+                _ => break,
+            },
         }
     }
-    let _ = cmd.send(Cmd::Disconnected(id));
 }
 
-async fn handshake(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-    out: &UnboundedSender<ServerMsg>,
-    cmd: &UnboundedSender<Cmd>,
-) -> Option<PlayerId> {
-    let reject = |code: ErrorCode| {
-        let _ = out.send(error_msg(code));
-    };
-    let Ok(Some(line)) = read_line_limited(reader).await else {
-        return None;
-    };
-    let Ok(ClientMsg::Join {
-        name,
-        protocol_version,
-    }) = serde_json::from_str::<ClientMsg>(&line)
-    else {
-        reject(ErrorCode::ExpectedJoin);
-        return None;
-    };
-    let (reply, rx) = oneshot::channel();
-    cmd.send(Cmd::Join {
-        name,
-        version: protocol_version,
-        out: out.clone(),
-        reply,
-    })
-    .ok()?;
-    rx.await.ok().flatten()
-}
-
-fn error_msg(code: ErrorCode) -> ServerMsg {
+pub(crate) fn error_msg(code: ErrorCode) -> ServerMsg {
     ServerMsg::Error {
         code,
         message: code.message(quiz_core::Lang::Fr).to_string(),
@@ -281,9 +313,17 @@ fn error_msg(code: ErrorCode) -> ServerMsg {
 }
 
 // A single task owns `Game` and all connection senders, so no locks are needed.
+struct Conn {
+    id: u64,
+    out: UnboundedSender<ServerMsg>,
+    _kill: oneshot::Sender<()>,
+}
+
 struct Actor {
     game: Game,
-    conns: HashMap<PlayerId, UnboundedSender<ServerMsg>>,
+    conns: HashMap<PlayerId, Conn>,
+    grace_ms: u64,
+    last_reveal: Option<ServerMsg>,
     events: UnboundedSender<HostEvent>,
     waker: Option<Waker>,
     base: Instant,
@@ -302,12 +342,18 @@ impl Actor {
         self.emit(HostEvent::LobbyChanged(self.game.lobby()));
         loop {
             let deadline = self.game.deadline_ms();
+            let expiry = self.game.next_expiry_ms(self.grace_ms);
             tokio::select! {
                 c = cmd_rx.recv() => match c {
                     None | Some(Cmd::Shutdown) => break,
                     Some(c) => self.handle(c),
                 },
                 _ = wait_deadline(self.base, deadline) => self.reveal(),
+                _ = wait_deadline(self.base, expiry) => {
+                    if self.game.expire_disconnected(self.now_ms(), self.grace_ms) {
+                        self.lobby_changed();
+                    }
+                }
             }
         }
         if let Some(a) = self.announcer.take() {
@@ -328,14 +374,14 @@ impl Actor {
     }
 
     fn broadcast(&self, msg: ServerMsg) {
-        for tx in self.conns.values() {
-            let _ = tx.send(msg.clone());
+        for c in self.conns.values() {
+            let _ = c.out.send(msg.clone());
         }
     }
 
     fn send_to(&self, id: PlayerId, msg: ServerMsg) {
-        if let Some(tx) = self.conns.get(&id) {
-            let _ = tx.send(msg);
+        if let Some(c) = self.conns.get(&id) {
+            let _ = c.out.send(msg);
         }
     }
 
@@ -353,25 +399,39 @@ impl Actor {
             Cmd::Join {
                 name,
                 version,
+                resume,
+                device,
+                conn_id,
                 out,
+                kill,
                 reply,
             } => {
-                let result = if version != PROTOCOL_VERSION {
+                let admitted = if version != PROTOCOL_VERSION {
                     Err(ErrorCode::VersionMismatch)
                 } else {
-                    self.game.add_player(&name).map_err(ErrorCode::from)
+                    self.admit(&name, resume.as_deref(), device)
                 };
-                match result {
-                    Ok(id) => {
+                match admitted {
+                    Ok((id, resumed, token)) => {
                         let _ = out.send(ServerMsg::Welcome {
                             protocol_version: PROTOCOL_VERSION,
                             player_id: id,
+                            resume_token: token,
                         });
-                        self.conns.insert(id, out);
+                        // Replacing an entry drops the old sender and kill switch: last connection wins.
+                        self.conns.insert(
+                            id,
+                            Conn {
+                                id: conn_id,
+                                out,
+                                _kill: kill,
+                            },
+                        );
                         let _ = reply.send(Some(id));
                         self.lobby_changed();
-                        // Late joiner: gets the running question (with remaining time) or the final ranking;
-                        // during a reveal they simply wait for the next question.
+                        // Late joiner or resumed player: gets the running question (with remaining
+                        // time) or the final ranking. A resumed player also gets the current
+                        // reveal; a new one simply waits for the next question.
                         if let Some(q) = self.game.current_public(self.now_ms()) {
                             self.send_to(id, ServerMsg::Question(q));
                             self.progress();
@@ -382,6 +442,10 @@ impl Actor {
                                     ranking: self.game.ranking(),
                                 },
                             );
+                        } else if resumed && self.game.in_reveal() {
+                            if let Some(r) = self.last_reveal.clone() {
+                                self.send_to(id, r);
+                            }
                         }
                     }
                     Err(code) => {
@@ -400,9 +464,13 @@ impl Actor {
                     self.record_answer(HOST_ID, q, choice);
                 }
             }
-            Cmd::Disconnected(id) => {
+            Cmd::Disconnected { id, conn_id } => {
+                // A replaced connection reports in late: it must not evict its successor.
+                if self.conns.get(&id).is_none_or(|c| c.id != conn_id) {
+                    return;
+                }
                 self.conns.remove(&id);
-                if self.game.remove_player(id) {
+                if self.game.disconnect(id, self.now_ms()) {
                     self.lobby_changed();
                     if self.game.in_question() {
                         self.progress();
@@ -453,6 +521,31 @@ impl Actor {
         }
     }
 
+    /// Returns (player id, resumed?, fresh resume token).
+    fn admit(
+        &mut self,
+        name: &str,
+        resume: Option<&str>,
+        device: Device,
+    ) -> Result<(PlayerId, bool, String), ErrorCode> {
+        let token = new_token().ok_or(ErrorCode::Internal)?;
+        let resumed = match resume {
+            Some(t) => self.game.resume(t, device).map_err(ErrorCode::from)?,
+            None => None,
+        };
+        let (id, was_resumed) = match resumed {
+            Some(id) => (id, true),
+            None => (
+                self.game
+                    .add_player_on(name, device)
+                    .map_err(ErrorCode::from)?,
+                false,
+            ),
+        };
+        self.game.set_token(id, token.clone());
+        Ok((id, was_resumed, token))
+    }
+
     fn record_answer(&mut self, id: PlayerId, question_id: u32, choice: usize) {
         if self.game.answer(id, question_id, choice, self.now_ms()) {
             self.progress();
@@ -473,13 +566,25 @@ impl Actor {
 
     fn reveal(&mut self) {
         if let Some(info) = self.game.reveal() {
-            self.broadcast(ServerMsg::Reveal {
+            let msg = ServerMsg::Reveal {
                 question_id: info.question_id,
                 correct: info.correct,
                 explanation: info.explanation.clone(),
                 scores: info.scores.clone(),
-            });
+            };
+            self.last_reveal = Some(msg.clone());
+            self.broadcast(msg);
             self.emit(HostEvent::Revealed(info));
         }
     }
+}
+
+fn new_token() -> Option<String> {
+    use std::fmt::Write;
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(bytes.iter().fold(String::with_capacity(32), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
 }

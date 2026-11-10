@@ -58,6 +58,7 @@ async fn discovery_by_real_broadcast_then_play_on_lan_ip() {
         time_limit: None,
         announce: true,
         discovery_port: dport,
+        web_port: None,
         ..HostConfig::default() // announce_ip = 255.255.255.255, as in production
     })
     .await

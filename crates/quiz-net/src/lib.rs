@@ -2,6 +2,7 @@
 //! Everything is non-blocking; callers drain `events` receivers with `try_recv()`.
 
 mod client;
+mod conn;
 mod discovery;
 mod error;
 pub mod game;
@@ -10,6 +11,7 @@ mod io;
 mod netif;
 mod protocol;
 mod server;
+mod web;
 
 use std::sync::Arc;
 
@@ -23,7 +25,8 @@ pub use game::{JoinError, PlayerId, HOST_ID, MAX_PLAYERS};
 pub use heartbeat::HeartbeatConfig;
 pub use netif::{local_ipv4_addrs, LocalAddr};
 pub use protocol::{
-    ClientMsg, ErrorCode, GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry, ServerMsg,
-    DEFAULT_PORT, DISCOVERY_PORT, MAX_LINE_BYTES, PROTOCOL_VERSION,
+    ClientMsg, Device, ErrorCode, GamePhase, PlayerInfo, PublicQuestion, RankEntry, ScoreEntry,
+    ServerMsg, DEFAULT_PORT, DISCOVERY_PORT, MAX_LINE_BYTES, MAX_WS_FRAME_BYTES, PROTOCOL_VERSION,
 };
-pub use server::{Host, HostConfig, HostEvent, HostHandle};
+pub use server::{Host, HostConfig, HostEvent, HostHandle, DEFAULT_WEB_PORT};
+pub use web::WebAssets;

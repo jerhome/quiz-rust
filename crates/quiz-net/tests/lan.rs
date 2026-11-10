@@ -30,6 +30,7 @@ async fn host(time_limit: Option<Duration>) -> HostHandle {
         port: 0,
         time_limit,
         announce: false,
+        web_port: None,
         ..HostConfig::default()
     })
     .await
@@ -85,6 +86,7 @@ async fn full_game_with_two_clients() {
         waker: Some(Arc::new(move || {
             c2.fetch_add(1, Ordering::SeqCst);
         })),
+        web_port: None,
         ..HostConfig::default()
     })
     .await
@@ -416,7 +418,7 @@ async fn disconnect_in_lobby_and_in_game() {
     bob.disconnect();
     host_event_until(
         &mut h,
-        |e| matches!(e, HostEvent::LobbyChanged(p) if p.len() == 2),
+        |e| matches!(e, HostEvent::LobbyChanged(p) if p.iter().filter(|x| x.connected).count() == 2),
     )
     .await;
     h.start_game(questions(1), None);
@@ -482,6 +484,7 @@ async fn host_announces_and_client_discovers() {
         announce: true,
         discovery_port: port,
         announce_ip: "127.0.0.1".parse().unwrap(),
+        web_port: None,
         ..HostConfig::default()
     })
     .await
